@@ -34,7 +34,7 @@ from qgis.core import (
 )
 
 
-SPLIT_VERSION = "1.1.1"
+SPLIT_VERSION = "1.1.2"
 
 
 class PolygonSplitTool(QgsMapTool):
@@ -427,6 +427,8 @@ class SplitDialog(QDialog):
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         project_dir, project_stem = self._project_output_info()
+        split_folder = project_dir / ("%s_split SHP" % project_stem)
+        split_folder.mkdir(parents=True, exist_ok=True)
         temp_dir = Path(tempfile.mkdtemp(prefix="merge_split_qgz_"))
         try:
             qgs_path = temp_dir / "split_project.qgs"
@@ -450,7 +452,7 @@ class SplitDialog(QDialog):
                     layer, ids, temp_shp, "ESRI Shapefile",
                     layer_name=layer_name, first_file=True
                 )
-                external_stem = project_dir / layer_name
+                external_stem = split_folder / layer_name
                 self._copy_shapefile_bundle(temp_shp, external_stem)
                 external_bundles.append(external_stem)
 
@@ -478,9 +480,48 @@ class SplitDialog(QDialog):
                 for item in sorted(temp_dir.iterdir()):
                     if item.is_file():
                         archive.write(item, item.name)
-            return len(created), total, external_bundles
+            return len(created), total, external_bundles, split_folder
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def _delete_after_split(self, matches):
+        total = 0
+        layers = 0
+        skipped = 0
+        errors = []
+        for layer, ids in matches:
+            started_here = False
+            try:
+                if not layer.isEditable():
+                    if not layer.startEditing():
+                        skipped += len(ids)
+                        errors.append("%s: 无法进入编辑状态" % layer.name())
+                        continue
+                    started_here = True
+                if not layer.deleteFeatures(ids):
+                    skipped += len(ids)
+                    errors.append("%s: 删除要素失败" % layer.name())
+                    if started_here:
+                        layer.rollBack()
+                    continue
+                if started_here and not layer.commitChanges():
+                    skipped += len(ids)
+                    errors.append("%s: 提交删除失败" % layer.name())
+                    layer.rollBack()
+                    continue
+                total += len(ids)
+                layers += 1
+            except Exception as exc:
+                skipped += len(ids)
+                errors.append("%s: %s" % (layer.name(), exc))
+                if started_here and layer.isEditable():
+                    try:
+                        layer.rollBack()
+                    except Exception:
+                        pass
+        QgsProject.instance().setDirty(True)
+        self.iface.mapCanvas().refresh()
+        return total, layers, skipped, errors
 
     def _copy_layer_style(self, source, target):
         try:
@@ -554,7 +595,9 @@ class SplitDialog(QDialog):
                 path = project_dir / ("%s_split.qgz" % project_stem)
 
                 self.progress.setValue(20)
-                layers, total, shp_bundles = self._create_qgz(matches, path)
+                layers, total, shp_bundles, split_folder = self._create_qgz(matches, path)
+                self.progress.setValue(65)
+                deleted, deleted_layers, skipped, delete_errors = self._delete_after_split(matches)
                 self.progress.setValue(100)
                 self._log(
                     "[SPLIT QGZ] path=%s layers=%d features=%d"
@@ -563,12 +606,14 @@ class SplitDialog(QDialog):
                 QMessageBox.information(
                     self,
                     "Merge and Split",
-                    "QGZ 拆分完成。\n\n"
-                    "图层：%d\n"
-                    "要素：%d\n"
+                    "拆分完成。\n\n"
+                    "原工程：已删除拆分区域要素\n"
+                    "删除要素：%d\n"
+                    "QGZ 图层：%d\n"
+                    "QGZ 要素：%d\n"
                     "QGZ：%s\n"
-                    "同步 SHP：%d 个图层"
-                    % (layers, total, path, len(shp_bundles))
+                    "SHP 文件夹：%s"
+                    % (deleted, layers, total, path, split_folder)
                 )
                 self.polygon = None
                 return
