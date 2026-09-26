@@ -2,10 +2,10 @@
 name=Merge and Split
 qgisMinimumVersion=3.28
 description=Merge vector features from selected folders into the current QGIS project, or split/delete/export features inside a drawn polygon.
-version=1.1.0
+version=1.1.1
 author=wangyangyuan18-design
 email=
-about=QGIS文件合并和区域拆分工具。支持绘制多边形后删除区域内要素、另存为自包含QGZ工程，或按SHP/GPKG/GeoJSON/KML/GML导出到文件夹。
+about=QGIS文件合并和区域拆分工具。支持绘制多边形后删除区域内要素、另存为自包含QGZ工程，或按SHP/GeoJSON/KML/GML导出到文件夹。
 category=Vector
 icon=icon.svg
 experimental=False
