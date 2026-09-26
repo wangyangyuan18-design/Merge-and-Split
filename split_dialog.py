@@ -447,10 +447,20 @@ class SplitDialog(QDialog):
         return exported, total, errors
 
     @staticmethod
+    def _remove_shapefile_bundle(stem):
+        stem = Path(stem)
+        for path in stem.parent.glob(stem.name + ".*"):
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+
+    @staticmethod
     def _copy_shapefile_bundle(source_stem, target_stem):
         source_stem = Path(source_stem)
         target_stem = Path(target_stem)
         target_stem.parent.mkdir(parents=True, exist_ok=True)
+        SplitDialog._remove_shapefile_bundle(target_stem)
         copied = []
         for source in sorted(source_stem.parent.glob(source_stem.name + ".*")):
             target = target_stem.parent / (target_stem.name + source.suffix)
