@@ -93,15 +93,12 @@ class PolygonSplitTool(QgsMapTool):
 
         polygon = QgsGeometry.fromPolygonXY([self.points])
         if polygon.isEmpty() or not polygon.isGeosValid():
-            # A self-intersecting polygon can still be drawn, but it is safer
-            # to stop here rather than run destructive operations.
-            if polygon.isEmpty():
-                QMessageBox.warning(
-                    self.iface.mainWindow(),
-                    "Merge and Split",
-                    "多边形无效，请重新绘制。"
-                )
-                return
+            QMessageBox.warning(
+                self.iface.mainWindow(),
+                "Merge and Split",
+                "多边形无效或存在自相交，请重新绘制。"
+            )
+            return
 
         self._finish(polygon)
 
