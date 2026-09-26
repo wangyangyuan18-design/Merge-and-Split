@@ -814,8 +814,8 @@ class MergeSplitDialog(QDialog):
 
                 if not self._compatible(target, source):
                     errors.append(
-                        "%s :: %s → 几何类型不兼容\\n"
-                        "工程1：%s\\n"
+                        "%s :: %s → 几何类型不兼容\n"
+                        "工程1：%s\n"
                         "源图层：%s" %
                         (
                             Path(source["folder"]).name,
