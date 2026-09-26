@@ -6,7 +6,7 @@ from qgis.PyQt.QtWidgets import (
     QAbstractItemView, QRadioButton, QComboBox, QDialogButtonBox, QStyle
 )
 from qgis.PyQt.QtCore import Qt
-PLUGIN_VERSION = "1.0.8"
+PLUGIN_VERSION = "1.1.2"
 
 from qgis.core import (
     QgsProject, QgsVectorLayer, QgsFeature, QgsGeometry, QgsCoordinateTransform,
