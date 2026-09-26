@@ -106,7 +106,7 @@ class MergeSplitDialog(QDialog):
         self._created_target_names = set()
         self._diagnostic_lines = []
         self._last_resolution_error = ""
-        self.setWindowTitle("Merge and Split - 合并 v1.0.4")
+        self.setWindowTitle("Merge and Split - 合并 v1.0.5")
         self.resize(1250, 700)
         self._build_ui()
 
@@ -217,6 +217,7 @@ class MergeSplitDialog(QDialog):
             "source_file=%s" % source.get("path", ""),
             "source_provider=%s" % source["layer"].providerType(),
             "same_name_target_count=%d" % len(candidates),
+            "normalized_target_key_exists=%s" % (name in target_layers),
         ]
 
         if not candidates:
@@ -697,7 +698,17 @@ class MergeSplitDialog(QDialog):
 
         target_layers = self._target_layers()
         if name in target_layers:
-            target = self._first_target(target_layers[name])
+            candidates = target_layers[name]
+            if len(candidates) > 1:
+                QMessageBox.warning(
+                    self,
+                    "目标图层不唯一",
+                    "工程1存在 %d 个同名图层“%s”，无法自动判断应该合并到哪个图层。"
+                    % (len(candidates), name)
+                )
+                return
+
+            target = candidates[0]
             source_layer = item.data(Qt.UserRole)
             if (
                 isinstance(target, QgsVectorLayer)
@@ -1015,8 +1026,16 @@ class MergeSplitDialog(QDialog):
             return None
 
         if mapping["action"] == "move":
-            targets = target_layers.get(mapping["target"], [])
-            return self._first_target(targets)
+            targets = target_layers.get(
+                self._normalized_name(mapping["target"]), []
+            )
+            if len(targets) == 1:
+                return targets[0]
+            if len(targets) > 1:
+                self._last_resolution_error = "MULTIPLE_TARGETS"
+            else:
+                self._last_resolution_error = "MAPPED_TARGET_NOT_FOUND"
+            return None
 
         if mapping["action"] == "new":
             return self._create_target_layer(source["layer"], name)
@@ -1205,6 +1224,12 @@ class MergeSplitDialog(QDialog):
 
         total_added = 0
         original_target_names = set(self._target_layers().keys())
+        resolved_count = 0
+        geometry_pass_count = 0
+        geometry_fail_count = 0
+        invalid_count = 0
+        write_fail_count = 0
+        merge_pass_count = 0
         skipped_layers = []
         errors = []
 
@@ -1263,6 +1288,8 @@ class MergeSplitDialog(QDialog):
                         Qgis.Warning
                     )
 
+                resolved_count += 1
+
                 self._log(
                     "[TARGET CHOSEN] matrix=%s | target_id=%s | target_name=%r | source_id=%s"
                     % (
@@ -1305,6 +1332,7 @@ class MergeSplitDialog(QDialog):
                 )
 
                 if not compare["compatible"]:
+                    geometry_fail_count += 1
                     errors.append(
                         "%s :: %s → 几何类型不兼容\\n%s" %
                         (
@@ -1323,6 +1351,8 @@ class MergeSplitDialog(QDialog):
                     )
                     continue
 
+                geometry_pass_count += 1
+
                 if not compare["target_valid"] or not compare["source_valid"]:
                     invalid_text = (
                         "%s :: %s → 图层无效\\n%s" %
@@ -1332,6 +1362,7 @@ class MergeSplitDialog(QDialog):
                             diagnostic
                         )
                     )
+                    invalid_count += 1
                     errors.append(invalid_text)
                     self._log(invalid_text, Qgis.Warning)
                     continue
@@ -1341,6 +1372,7 @@ class MergeSplitDialog(QDialog):
                         target, source["layer"]
                     )
                     total_added += added
+                    merge_pass_count += 1
                     self._log(
                         "[MERGE PASS] %s -> %s | added=%d | target_after=%d"
                         % (
@@ -1351,6 +1383,7 @@ class MergeSplitDialog(QDialog):
                         )
                     )
                 except Exception as exc:
+                    write_fail_count += 1
                     compare_text = self._format_geometry_diagnostic(compare)
                     fail_text = (
                         "%s :: %s → 写入失败：%s\\n%s" %
@@ -1392,6 +1425,12 @@ class MergeSplitDialog(QDialog):
                 "参与图层=%d\n"
                 "未找到目标=%d\n"
                 "错误=%d\n"
+                "目标解析=%d\n"
+                "几何通过=%d\n"
+                "几何失败=%d\n"
+                "图层无效=%d\n"
+                "写入成功=%d\n"
+                "写入失败=%d\n"
                 "新增要素=%d"
                 % (
                     sum(1 for enabled in self.folder_enabled if enabled),
@@ -1399,6 +1438,12 @@ class MergeSplitDialog(QDialog):
                     len(participating_names),
                     len(skipped_layers),
                     len(errors),
+                    resolved_count,
+                    geometry_pass_count,
+                    geometry_fail_count,
+                    invalid_count,
+                    merge_pass_count,
+                    write_fail_count,
                     total_added
                 )
             )
@@ -1417,16 +1462,21 @@ class MergeSplitDialog(QDialog):
             )
 
             if errors:
-                # Always show how many geometry checks were performed.
                 message += (
-                    "\\n\\n几何诊断：已执行 %d 个目标匹配，其中 %d 个通过几何检查。"
+                    "\n\n处理诊断：\n"
+                    "目标解析：%d\n"
+                    "几何通过：%d\n"
+                    "几何失败：%d\n"
+                    "图层无效：%d\n"
+                    "写入成功：%d\n"
+                    "写入失败：%d"
                     % (
-                        len([s for s in selected if s["layer"].id() in self._source_target_map]),
-                        len([s for s in selected if s["layer"].id() in self._source_target_map])
-                        - len([
-                            e for e in errors
-                            if "几何类型不兼容" in e
-                        ])
+                        resolved_count,
+                        geometry_pass_count,
+                        geometry_fail_count,
+                        invalid_count,
+                        merge_pass_count,
+                        write_fail_count
                     )
                 )
 
