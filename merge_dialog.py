@@ -206,6 +206,8 @@ class MergeSplitDialog(QDialog):
 
     def _set_layer_item(self, row, col, layer):
         text, count = self._cell_text(layer)
+        if count >= 0:
+            text = self._display_name(layer) + " [%d]" % count
         item = QTableWidgetItem(text)
         item.setData(Qt.UserRole, layer)
         item.setData(Qt.UserRole + 1, layer.name())
@@ -216,24 +218,39 @@ class MergeSplitDialog(QDialog):
 
         self.layers.setItem(row, col, item)
 
+    def _display_name(self, layer):
+        name = layer.name()
+        mapping = self.mappings.get(name)
+        if mapping:
+            if mapping.get("action") == "new":
+                return name + "（新增）★"
+            if mapping.get("action") == "move":
+                return name + "（移至）★"
+        return name
+
     def _rebuild_matrix(self):
         target_layers = self._target_layers()
         target_names = list(target_layers.keys())
 
-        source_by_name = {}
-        first_order = []
+        # A mapped source layer belongs to the target row. For example:
+        # source OLT -> existing Pre Connect Cable means the OLT cell is
+        # displayed on the Pre Connect Cable row, with a global mapping mark.
+        row_names = list(target_names)
+        source_records_by_row = {}
 
         for source in self.sources:
             name = source["layer"].name()
-            source_by_name.setdefault(name, []).append(source)
-            if name not in first_order:
-                first_order.append(name)
+            mapping = self.mappings.get(name)
+            row_name = name
 
-        # Engineering 1 controls the first rows and their order.
-        row_names = list(target_names)
-        for name in first_order:
-            if name not in row_names:
-                row_names.append(name)
+            if mapping and mapping.get("action") == "move":
+                target_name = mapping.get("target")
+                if target_name in target_layers:
+                    row_name = target_name
+
+            if row_name not in row_names:
+                row_names.append(row_name)
+            source_records_by_row.setdefault(row_name, []).append(source)
 
         self.layers.clear()
         self.layers.setColumnCount(1 + len(self.folders))
@@ -245,49 +262,54 @@ class MergeSplitDialog(QDialog):
             headers.append("%s %s" % (Path(folder).name, mark))
         self.layers.setHorizontalHeaderLabels(headers)
 
-        self.layers.horizontalHeader().setSectionResizeMode(
-            0, QHeaderView.ResizeToContents
-        )
-        for col in range(1, self.layers.columnCount()):
-            self.layers.horizontalHeader().setSectionResizeMode(
-                col, QHeaderView.Stretch
-            )
-
         name_to_row = {name: i for i, name in enumerate(row_names)}
 
-        # Master project column.
+        # Engineering 1 column remains the master order. Newly created target
+        # layers are appended to this list, so they appear at the bottom.
         for name, matches in target_layers.items():
             row = name_to_row[name]
             item = QTableWidgetItem(name)
             item.setData(Qt.UserRole, matches[0])
             self.layers.setItem(row, 0, item)
 
-        # Folder columns.
+        # Folder columns. A mapped source is rendered on its target row.
+        seen = set()
         for source in self.sources:
             name = source["layer"].name()
-            row = name_to_row[name]
+            mapping = self.mappings.get(name)
+            row_name = name
+            if mapping and mapping.get("action") == "move":
+                target_name = mapping.get("target")
+                if target_name in target_layers:
+                    row_name = target_name
+
+            row = name_to_row.get(row_name)
+            if row is None:
+                continue
             col = self.folders.index(source["folder"]) + 1
+            key = (row, col)
+            if key in seen:
+                continue
+            seen.add(key)
             self._set_layer_item(row, col, source["layer"])
 
-        # Store the source record on each cell. Duplicate same-name layers
-        # in one folder are not silently overwritten; the first is displayed
-        # and the user can see the total through the status below.
-        for row, name in enumerate(row_names):
-            occurrences = {}
-            for source in source_by_name.get(name, []):
-                key = (source["folder"], name)
-                occurrences[key] = occurrences.get(key, 0) + 1
+        # Make the matrix compact. Long folder names no longer consume the
+        # entire window; horizontal scrolling is available when needed.
+        header = self.layers.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.Interactive)
+        self.layers.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.layers.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
 
-            for (folder, lname), count in occurrences.items():
-                if count <= 1:
-                    continue
-                col = self.folders.index(folder) + 1
+        for col in range(self.layers.columnCount()):
+            width = 90
+            header_text = self.layers.horizontalHeaderItem(col)
+            if header_text:
+                width = max(width, min(180, len(header_text.text()) * 9 + 24))
+            for row in range(self.layers.rowCount()):
                 item = self.layers.item(row, col)
                 if item:
-                    item.setToolTip(
-                        "%s：同一文件夹发现 %d 个同名图层；"
-                        "当前单元显示第一个。" % (lname, count)
-                    )
+                    width = max(width, min(180, len(item.text()) * 8 + 24))
+            header.resizeSection(col, width)
 
     def add_folders(self):
         # Non-native dialog permits selecting several directories with Ctrl.
@@ -398,11 +420,13 @@ class MergeSplitDialog(QDialog):
         if action == "new":
             try:
                 source = self._first_source_by_name(name)
+                # Add without implicit legend insertion, then explicitly add
+                # to the root at the end. This prevents random placement.
                 self._create_target_layer(source["layer"], name)
                 QMessageBox.information(
                     self, "已新增",
-                    "已在工程1新增图层：%s\n所有文件夹中的同名图层将统一汇总到该图层。"
-                    % name
+                    "已在工程1图层最下面新增：%s（新增）★\n"
+                    "所有文件夹中的同名图层将统一汇总到该图层。" % name
                 )
             except Exception as exc:
                 self.mappings.pop(name, None)
@@ -411,6 +435,9 @@ class MergeSplitDialog(QDialog):
                 )
                 return
 
+        # For “移至”, no data is moved yet. The matrix immediately relocates
+        # the source row under the selected Engineering 1 target row and marks
+        # it as （移至）★. The actual feature append happens in 合并.
         self._rebuild_matrix()
 
     def _first_source_by_name(self, name):
@@ -441,7 +468,12 @@ class MergeSplitDialog(QDialog):
 
         layer.dataProvider().addAttributes(list(source.fields()))
         layer.updateFields()
-        QgsProject.instance().addMapLayer(layer)
+
+        project = QgsProject.instance()
+        # False prevents QGIS from choosing an automatic legend position.
+        project.addMapLayer(layer, False)
+        root = project.layerTreeRoot()
+        root.addLayer(layer)  # append to the bottom of Engineering 1
         return layer
 
     def _compatible(self, target, source):
