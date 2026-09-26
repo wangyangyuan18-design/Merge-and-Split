@@ -1,11 +1,11 @@
 [general]
 name=Merge and Split
 qgisMinimumVersion=3.28
-description=Merge features from selected QGIS projects and single vector layers into same-named layers of the current project.
+description=Merge vector features from selected folders into same-named layers of the current QGIS project (Engineering 1).
 version=1.0.2
 author=wangyangyuan18-design
 email=
-about=QGIS文件合并和拆分工具。第一阶段支持多选QGIS工程文件或单图层文件，并按图层名称汇总要素到当前工程。
+about=QGIS文件合并和拆分工具。当前阶段以打开的工程为工程1，批量读取文件夹中的矢量图层并按名称合并。
 category=Vector
 icon=icon.svg
 experimental=False
