@@ -482,7 +482,7 @@ class MergeSplitDialog(QDialog):
             row_name = normalized_name
 
             if mapping and mapping.get("action") == "move":
-                target_name = mapping.get("target")
+                target_name = self._normalized_name(mapping.get("target"))
                 if target_name in target_layers:
                     row_name = target_name
 
@@ -541,7 +541,7 @@ class MergeSplitDialog(QDialog):
             mapping = self.mappings.get(normalized_name)
             row_name = normalized_name
             if mapping and mapping.get("action") == "move":
-                target_name = mapping.get("target")
+                target_name = self._normalized_name(mapping.get("target"))
                 if target_name in target_layers:
                     row_name = target_name
 
@@ -699,7 +699,7 @@ class MergeSplitDialog(QDialog):
         normalized_name = self._normalized_name(name)
         target_layers = self._target_layers()
         if normalized_name in target_layers:
-            candidates = target_layers[name]
+            candidates = target_layers[normalized_name]
             if len(candidates) > 1:
                 QMessageBox.warning(
                     self,
