@@ -14,7 +14,7 @@ from qgis.core import (
 
 
 class MappingDialog(QDialog):
-    def __init__(self, layer_name, target_names, parent=None):
+    def __init__(self, layer_name, source_geometry_type, target_layers, parent=None):
         super().__init__(parent)
         self.setWindowTitle("图层处理")
         self.resize(360, 170)
@@ -29,7 +29,9 @@ class MappingDialog(QDialog):
         layout.addWidget(self.move_radio)
 
         self.combo = QComboBox()
-        self.combo.addItems(target_names)
+        for target in target_layers:
+            if target.geometryType() == source_geometry_type:
+                self.combo.addItem(target.name())
         layout.addWidget(self.combo)
 
         self.new_radio.toggled.connect(self.combo.setDisabled)
@@ -279,7 +281,7 @@ class MergeSplitDialog(QDialog):
         # layers are appended to this list, so they appear at the bottom.
         for name, matches in target_layers.items():
             row = name_to_row[name]
-            item = QTableWidgetItem(name)
+            item = QTableWidgetItem(self._display_name(matches[0]))
             item.setData(Qt.UserRole, matches[0])
             self.layers.setItem(row, 0, item)
 
@@ -411,14 +413,30 @@ class MergeSplitDialog(QDialog):
             )
             return
 
-        target_names = list(target_layers.keys())
-        if not target_names:
+        source_layer = item.data(Qt.UserRole)
+        source_geometry_type = (
+            source_layer.geometryType()
+            if isinstance(source_layer, QgsVectorLayer)
+            else None
+        )
+        compatible_targets = []
+        for targets in target_layers.values():
+            for target in targets:
+                if (
+                    source_geometry_type is None
+                    or target.geometryType() == source_geometry_type
+                ):
+                    compatible_targets.append(target)
+
+        if not compatible_targets:
             QMessageBox.warning(
-                self, "提示", "工程1目前没有可作为“移至”目标的矢量图层。"
+                self, "提示", "工程1没有与源图层点/线/面类型相同的可移至图层。"
             )
             return
 
-        dialog = MappingDialog(name, target_names, self)
+        dialog = MappingDialog(
+            name, source_geometry_type, compatible_targets, self
+        )
         if dialog.exec_() != QDialog.Accepted:
             return
 
@@ -460,7 +478,7 @@ class MergeSplitDialog(QDialog):
     def _create_target_layer(self, source, name):
         target_layers = self._target_layers()
         if name in target_layers:
-            return target_layers[name][0]
+            return self._first_target(target_layers[name])
 
         geometry_map = {
             0: "Point",
@@ -487,7 +505,23 @@ class MergeSplitDialog(QDialog):
         root.addLayer(layer)  # append to the bottom of Engineering 1
         return layer
 
+    def _first_target(self, target):
+        if isinstance(target, dict):
+            values = []
+            for items in target.values():
+                if isinstance(items, list):
+                    values.extend(items)
+                elif isinstance(items, QgsVectorLayer):
+                    values.append(items)
+            return values[0] if values else None
+        if isinstance(target, list):
+            return target[0] if target else None
+        return target
+
     def _compatible(self, target, source):
+        target = self._first_target(target)
+        if target is None:
+            return False
         if target.geometryType() != source.geometryType():
             return False
         target_names = {f.name() for f in target.fields()}
@@ -496,17 +530,18 @@ class MergeSplitDialog(QDialog):
 
     def _resolve_target(self, source):
         name = source["layer"].name()
-        targets = self._target_layers().get(name, [])
+        target_layers = self._target_layers()
+        targets = target_layers.get(name, [])
         if targets:
-            return targets[0]
+            return self._first_target(targets)
 
         mapping = self.mappings.get(name)
         if not mapping:
             return None
 
         if mapping["action"] == "move":
-            targets = self._target_layers().get(mapping["target"], [])
-            return targets[0] if targets else None
+            targets = target_layers.get(mapping["target"], [])
+            return self._first_target(targets)
 
         if mapping["action"] == "new":
             return self._create_target_layer(source["layer"], name)
