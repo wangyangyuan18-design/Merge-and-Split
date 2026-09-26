@@ -106,7 +106,7 @@ class MergeSplitDialog(QDialog):
         self._created_target_names = set()
         self._diagnostic_lines = []
         self._last_resolution_error = ""
-        self.setWindowTitle("Merge and Split - 合并 v1.0.5")
+        self.setWindowTitle("Merge and Split - 合并 v1.0.6")
         self.resize(1250, 700)
         self._build_ui()
 
@@ -474,8 +474,6 @@ class MergeSplitDialog(QDialog):
         # source OLT -> existing Pre Connect Cable means the OLT cell is
         # displayed on the Pre Connect Cable row, with a global mapping mark.
         row_names = list(target_names)
-        source_records_by_row = {}
-
         for source in self.sources:
             name = source["layer"].name()
             mapping = self.mappings.get(self._normalized_name(name))
@@ -488,7 +486,6 @@ class MergeSplitDialog(QDialog):
 
             if row_name not in row_names:
                 row_names.append(row_name)
-            source_records_by_row.setdefault(row_name, []).append(source)
 
         self.layers.setUpdatesEnabled(False)
         self.layers.clear()
@@ -742,12 +739,16 @@ class MergeSplitDialog(QDialog):
         )
         compatible_targets = []
         for targets in target_layers.values():
-            for target in targets:
-                if (
-                    source_geometry_type is None
-                    or self._flat_wkb_name(target) == source_geometry_type
-                ):
-                    compatible_targets.append(target)
+            # A target name must be unique in Engineering 1 to be a valid
+            # destination for a global mapping.
+            if len(targets) != 1:
+                continue
+            target = targets[0]
+            if (
+                source_geometry_type is None
+                or self._flat_wkb_name(target) == source_geometry_type
+            ):
+                compatible_targets.append(target)
 
         if not compatible_targets:
             QMessageBox.warning(
@@ -1145,7 +1146,8 @@ class MergeSplitDialog(QDialog):
                     geom = geom.clone()
                     if transform:
                         result = geom.transform(transform)
-                        if result != 0:
+                        result_code = self._safe_int(result)
+                        if result_code not in (0,):
                             raise RuntimeError(
                                 "几何 CRS 转换失败，feature=%s，result=%s"
                                 % (src_feat.id(), result)
