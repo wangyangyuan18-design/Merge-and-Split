@@ -37,7 +37,7 @@ class MappingDialog(QDialog):
         for target in target_layers:
             if (
                 hasattr(target, "wkbType")
-                and self._geometry_kind(target) == source_geometry_type
+                and self._flat_wkb_name(target) == source_geometry_type
             ):
                 self.combo.addItem(target.name())
         layout.addWidget(self.combo)
@@ -55,9 +55,21 @@ class MappingDialog(QDialog):
     def _geometry_kind(layer):
         try:
             from qgis.core import QgsWkbTypes
-            return QgsWkbTypes.geometryType(layer.wkbType())
+            return QgsWkbTypes.geometryType(
+                QgsWkbTypes.flatType(layer.wkbType())
+            )
         except Exception:
             return layer.geometryType()
+
+    @staticmethod
+    def _flat_wkb_name(layer):
+        try:
+            from qgis.core import QgsWkbTypes
+            return QgsWkbTypes.displayString(
+                QgsWkbTypes.flatType(layer.wkbType())
+            )
+        except Exception:
+            return str(layer.wkbType())
 
     def choice(self):
         if self.new_radio.isChecked():
@@ -91,7 +103,8 @@ class MergeSplitDialog(QDialog):
         self.folder_enabled = []
         self._feature_counts = {}
         self._source_target_map = {}
-        self.setWindowTitle("Merge and Split - 合并 v1.0.1")
+        self._created_target_names = set()
+        self.setWindowTitle("Merge and Split - 合并 v1.0.2")
         self.resize(1250, 700)
         self._build_ui()
 
@@ -540,6 +553,7 @@ class MergeSplitDialog(QDialog):
         self.sources.clear()
         self._feature_counts.clear()
         self._source_target_map.clear()
+        self._created_target_names.clear()
         self.mappings.clear()
         self.layers.clear()
 
@@ -591,7 +605,7 @@ class MergeSplitDialog(QDialog):
 
         source_layer = item.data(Qt.UserRole)
         source_geometry_type = (
-            self._geometry_kind(source_layer)
+            self._flat_wkb_name(source_layer)
             if isinstance(source_layer, QgsVectorLayer)
             else None
         )
@@ -600,7 +614,7 @@ class MergeSplitDialog(QDialog):
             for target in targets:
                 if (
                     source_geometry_type is None
-                    or self._geometry_kind(target) == source_geometry_type
+                    or self._flat_wkb_name(target) == source_geometry_type
                 ):
                     compatible_targets.append(target)
 
@@ -628,6 +642,9 @@ class MergeSplitDialog(QDialog):
                 # Add without implicit legend insertion, then explicitly add
                 # to the root at the end. This prevents random placement.
                 self._create_target_layer(source["layer"], name)
+                self._created_target_names.add(
+                    self._normalized_name(name)
+                )
                 QMessageBox.information(
                     self, "已新增",
                     "已在工程1图层最下面新增：%s（新增）★\n"
@@ -656,13 +673,19 @@ class MergeSplitDialog(QDialog):
         if name in target_layers:
             return self._first_target(target_layers[name])
 
-        geometry_map = {
-            0: "Point",
-            1: "LineString",
-            2: "Polygon",
-            3: "Unknown"
-        }
-        geom = geometry_map.get(source.geometryType(), "Unknown")
+        try:
+            from qgis.core import QgsWkbTypes
+            geom = QgsWkbTypes.displayString(
+                QgsWkbTypes.flatType(source.wkbType())
+            )
+        except Exception:
+            geometry_map = {
+                0: "Point",
+                1: "LineString",
+                2: "Polygon",
+                3: "Unknown"
+            }
+            geom = geometry_map.get(source.geometryType(), "Unknown")
         uri = "%s?crs=%s" % (
             geom,
             source.crs().authid() if source.crs().isValid() else "EPSG:4326"
@@ -816,7 +839,6 @@ class MergeSplitDialog(QDialog):
             return
 
         total_added = 0
-        matched_layer_names = set()
         skipped_layers = []
         errors = []
 
@@ -840,10 +862,6 @@ class MergeSplitDialog(QDialog):
                         (Path(source["folder"]).name, source["layer"].name())
                     )
                     continue
-
-                matched_layer_names.add(
-                    self._normalized_name(source["layer"].name())
-                )
 
                 if not self._compatible(target, source):
                     errors.append(
@@ -876,8 +894,19 @@ class MergeSplitDialog(QDialog):
             project.setDirty(True)
             self.progress.setValue(100)
 
-            # “参与图层” = 本次合并中实际解析到目标的唯一图层名称。
-            # 这样与成功匹配/几何检查的实际参与对象保持一致。
+            # “参与图层” = 源文件夹与原始工程1共同存在的图层名称。
+            # 用户后来通过“新增”创建的目标层不计入这里。
+            target_name_set = set(self._target_layers().keys())
+            participating_names = {
+                self._normalized_name(source["layer"].name())
+                for source in selected
+                if (
+                    self._normalized_name(source["layer"].name()) in target_name_set
+                    and self._normalized_name(source["layer"].name())
+                    not in self._created_target_names
+                )
+            }
+
             message = (
                 "合并完成。\n\n"
                 "参与文件夹：%d\n"
@@ -885,7 +914,7 @@ class MergeSplitDialog(QDialog):
                 "新增要素：%d"
                 % (
                     sum(1 for enabled in self.folder_enabled if enabled),
-                    len(matched_layer_names),
+                    len(participating_names),
                     total_added
                 )
             )
