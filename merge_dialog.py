@@ -1,19 +1,78 @@
+from pathlib import Path
+
 from qgis.PyQt.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QTreeWidget, QTreeWidgetItem,
-    QPushButton, QLabel, QFileDialog, QMessageBox, QProgressBar, QCheckBox
+    QDialog, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem,
+    QPushButton, QLabel, QFileDialog, QMessageBox, QProgressBar,
+    QAbstractItemView, QRadioButton, QComboBox, QDialogButtonBox,
+    QHeaderView
 )
 from qgis.PyQt.QtCore import Qt
-from qgis.core import QgsProject, QgsVectorLayer, QgsFeature, QgsCoordinateTransform
+from qgis.core import (
+    QgsProject, QgsVectorLayer, QgsFeature, QgsCoordinateTransform,
+    QgsProviderRegistry
+)
+
+
+class MappingDialog(QDialog):
+    def __init__(self, layer_name, target_names, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("图层处理")
+        self.resize(360, 170)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("<b>%s</b>" % layer_name))
+
+        self.new_radio = QRadioButton("新增图层")
+        self.move_radio = QRadioButton("移至已有图层")
+        self.move_radio.setChecked(True)
+        layout.addWidget(self.new_radio)
+        layout.addWidget(self.move_radio)
+
+        self.combo = QComboBox()
+        self.combo.addItems(target_names)
+        layout.addWidget(self.combo)
+
+        self.new_radio.toggled.connect(self.combo.setDisabled)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def choice(self):
+        if self.new_radio.isChecked():
+            return "new", None
+        return "move", self.combo.currentText()
 
 
 class MergeSplitDialog(QDialog):
+    """
+    Merge phase:
+      - Current QGIS project is the master/template project.
+      - User selects multiple folders.
+      - Each folder is scanned for vector data files.
+      - Same layer names are aligned to the master layer rows.
+      - Unmatched layers stay in their source-folder columns.
+      - Mapping an unmatched name is global: every folder's same-name layer
+        follows the same mapping.
+    """
+
+    SUPPORTED_EXTENSIONS = {
+        ".shp", ".gpkg", ".geojson", ".json", ".sqlite",
+        ".kml", ".kmz", ".tab", ".gml"
+    }
+
     def __init__(self, iface, parent=None):
         super().__init__(parent)
         self.iface = iface
-        self.source_projects = []
+        self.folders = []
         self.sources = []
+        self.mappings = {}
+        self.folder_enabled = []
         self.setWindowTitle("Merge and Split - 合并")
-        self.resize(820, 560)
+        self.resize(1250, 700)
         self._build_ui()
 
     def _build_ui(self):
@@ -21,8 +80,8 @@ class MergeSplitDialog(QDialog):
 
         layout.addWidget(QLabel(
             "<b>QGIS 文件合并</b><br>"
-            "选择多个工程或单图层文件，在下方图层界面确认后，"
-            "按图层名称将要素汇总到当前工程。"
+            "以当前打开的工程为工程1（总文件），选择多个文件夹，"
+            "扫描实际图层文件并按图层名称汇总。"
         ))
 
         self.target_label = QLabel()
@@ -30,29 +89,36 @@ class MergeSplitDialog(QDialog):
         self._refresh_target_label()
 
         row = QHBoxLayout()
-        self.add_btn = QPushButton("添加文件…")
-        self.remove_btn = QPushButton("移除选中文件")
+        self.add_folder_btn = QPushButton("添加文件夹…")
+        self.remove_folder_btn = QPushButton("移除选中文件夹")
         self.clear_btn = QPushButton("清空")
-        self.add_btn.clicked.connect(self.add_files)
-        self.remove_btn.clicked.connect(self.remove_selected_files)
-        self.clear_btn.clicked.connect(self.clear_files)
-        row.addWidget(self.add_btn)
-        row.addWidget(self.remove_btn)
+        self.add_folder_btn.clicked.connect(self.add_folders)
+        self.remove_folder_btn.clicked.connect(self.remove_selected_folder)
+        self.clear_btn.clicked.connect(self.clear_folders)
+        row.addWidget(self.add_folder_btn)
+        row.addWidget(self.remove_folder_btn)
         row.addWidget(self.clear_btn)
         row.addStretch()
         layout.addLayout(row)
 
-        self.layers = QTreeWidget()
-        self.layers.setHeaderLabels(["来源文件 / 图层", "目标图层", "状态", "要素数"])
-        self.layers.setColumnWidth(0, 390)
-        self.layers.setColumnWidth(1, 220)
-        self.layers.setSelectionMode(QTreeWidget.ExtendedSelection)
+        self.layers = QTableWidget()
+        self.layers.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.layers.setSelectionBehavior(QAbstractItemView.SelectItems)
+        self.layers.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.layers.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeToContents
+        )
+        self.layers.horizontalHeader().sectionClicked.connect(
+            self._header_clicked
+        )
+        self.layers.cellDoubleClicked.connect(self._cell_double_clicked)
         layout.addWidget(self.layers, 1)
 
-        self.skip_unmatched = QCheckBox("跳过目标工程中不存在的图层（推荐）")
-        self.skip_unmatched.setChecked(True)
-        self.skip_unmatched.stateChanged.connect(self._refresh_layer_status)
-        layout.addWidget(self.skip_unmatched)
+        layout.addWidget(QLabel(
+            "提示：同名图层自动对齐；未匹配图层仍显示在其所属文件夹列。"
+            "双击未匹配图层，可选择“新增”或“移至”工程1已有图层，"
+            "映射会对所有文件夹中的同名图层统一生效。"
+        ))
 
         self.progress = QProgressBar()
         self.progress.setRange(0, 100)
@@ -72,7 +138,8 @@ class MergeSplitDialog(QDialog):
     def _refresh_target_label(self):
         path = QgsProject.instance().fileName()
         self.target_label.setText(
-            "<b>总文件：</b>" + (path if path else "当前工程（尚未保存）")
+            "<b>工程1（总文件）：</b>" +
+            (path if path else "当前工程（尚未保存）")
         )
 
     def _target_layers(self):
@@ -82,104 +149,300 @@ class MergeSplitDialog(QDialog):
                 result.setdefault(layer.name(), []).append(layer)
         return result
 
-    def _load_source_layers(self, path):
-        if path.lower().endswith((".qgz", ".qgs")):
-            project = QgsProject()
-            if not project.read(path):
-                raise RuntimeError("无法读取QGIS工程：" + path)
-            self.source_projects.append(project)
-            return [
-                layer for layer in project.mapLayers().values()
-                if isinstance(layer, QgsVectorLayer)
-            ]
-
-        layer = QgsVectorLayer(path, "", "ogr")
+    def _load_layer(self, path, name=None, uri=None, provider="ogr"):
+        layer_path = uri if uri is not None else path
+        layer = QgsVectorLayer(layer_path, name or Path(path).stem, provider)
         if not layer.isValid():
             raise RuntimeError("无法读取图层：" + path)
-        return [layer]
+        return layer
 
-    def _add_source_file(self, path):
-        layers = self._load_source_layers(path)
-        file_item = QTreeWidgetItem(self.layers)
-        file_item.setText(0, path)
-        file_item.setFlags(file_item.flags() | Qt.ItemIsUserCheckable)
-        file_item.setCheckState(0, Qt.Checked)
-        file_item.setData(0, Qt.UserRole, path)
-        file_item.setExpanded(True)
-
-        for layer in layers:
-            item = QTreeWidgetItem(file_item)
-            item.setText(0, layer.name())
-            item.setCheckState(0, Qt.Checked)
-            item.setData(0, Qt.UserRole, layer)
-            item.setData(0, Qt.UserRole + 1, path)
-            item.setText(3, str(layer.featureCount()))
-
-            targets = self._target_layers().get(layer.name(), [])
-            if targets:
-                item.setText(1, targets[0].name())
-                item.setText(2, "可合并")
-                item.setToolTip(2, "目标工程存在同名图层")
-            else:
-                item.setText(1, "—")
-                item.setText(2, "无同名目标")
-                item.setToolTip(2, "当前工程没有同名图层")
-
-            self.sources.append({
-                "path": path,
-                "layer": layer,
-                "item": item
-            })
-
-    def add_files(self):
-        paths, _ = QFileDialog.getOpenFileNames(
-            self,
-            "选择QGIS工程或单图层文件",
-            "",
-            "QGIS/矢量文件 (*.qgz *.qgs *.gpkg *.shp *.geojson *.json *.sqlite *.kml *.kmz);;所有文件 (*.*)"
-        )
-        existing = {
-            self.layers.topLevelItem(i).data(0, Qt.UserRole)
-            for i in range(self.layers.topLevelItemCount())
-        }
-        for path in paths:
-            if path in existing:
+    def _scan_folder(self, folder):
+        result = []
+        root = Path(folder)
+        for path in sorted(root.iterdir()):
+            if not path.is_file():
                 continue
+            if path.suffix.lower() not in self.SUPPORTED_EXTENSIONS:
+                continue
+
+            # GeoPackage/SQLite may contain multiple vector layers.
+            if path.suffix.lower() in {".gpkg", ".sqlite"}:
+                try:
+                    details = QgsProviderRegistry.instance().querySublayers(
+                        str(path)
+                    )
+                except Exception:
+                    details = []
+
+                if details:
+                    for detail in details:
+                        try:
+                            layer = self._load_layer(
+                                str(path),
+                                name=detail.name(),
+                                uri=detail.uri(),
+                                provider=detail.providerKey()
+                            )
+                            result.append((layer, str(path)))
+                        except Exception:
+                            continue
+                    continue
+
             try:
-                self._add_source_file(path)
-            except Exception as exc:
-                QMessageBox.warning(self, "读取失败", path + "\n\n" + str(exc))
+                layer = self._load_layer(str(path))
+                result.append((layer, str(path)))
+            except Exception:
+                # Keep scanning the folder; one broken file must not block
+                # all other usable layers.
+                continue
+        return result
 
-        self._refresh_layer_status()
+    def _cell_text(self, layer):
+        try:
+            count = layer.featureCount()
+            return "%s [%d]" % (layer.name(), count), count
+        except Exception:
+            return "%s [读取失败]" % layer.name(), -1
 
-    def remove_selected_files(self):
-        selected = set()
-        for item in self.layers.selectedItems():
-            root = item if item.parent() is None else item.parent()
-            selected.add(root)
-        for root in selected:
-            path = root.data(0, Qt.UserRole)
-            self.sources = [s for s in self.sources if s["path"] != path]
-            self.layers.takeTopLevelItem(self.layers.indexOfTopLevelItem(root))
-        self._refresh_layer_status()
+    def _set_layer_item(self, row, col, layer):
+        text, count = self._cell_text(layer)
+        item = QTableWidgetItem(text)
+        item.setData(Qt.UserRole, layer)
+        item.setData(Qt.UserRole + 1, layer.name())
+        item.setData(Qt.UserRole + 2, count)
 
-    def clear_files(self):
-        self.layers.clear()
-        self.sources.clear()
-        self.source_projects.clear()
+        if count == 0:
+            item.setForeground(Qt.gray)
 
-    def _refresh_layer_status(self):
-        targets = self._target_layers()
+        self.layers.setItem(row, col, item)
+
+    def _rebuild_matrix(self):
+        target_layers = self._target_layers()
+        target_names = list(target_layers.keys())
+
+        source_by_name = {}
+        first_order = []
+
         for source in self.sources:
-            item = source["item"]
-            layer = source["layer"]
-            matches = targets.get(layer.name(), [])
-            if matches:
-                item.setText(1, matches[0].name())
-                item.setText(2, "可合并")
-            else:
-                item.setText(1, "—")
-                item.setText(2, "跳过" if self.skip_unmatched.isChecked() else "无同名目标")
+            name = source["layer"].name()
+            source_by_name.setdefault(name, []).append(source)
+            if name not in first_order:
+                first_order.append(name)
+
+        # Engineering 1 controls the first rows and their order.
+        row_names = list(target_names)
+        for name in first_order:
+            if name not in row_names:
+                row_names.append(name)
+
+        self.layers.clear()
+        self.layers.setColumnCount(1 + len(self.folders))
+        self.layers.setRowCount(len(row_names))
+
+        headers = ["工程1"]
+        for i, folder in enumerate(self.folders):
+            mark = "☑" if self.folder_enabled[i] else "☐"
+            headers.append("%s %s" % (Path(folder).name, mark))
+        self.layers.setHorizontalHeaderLabels(headers)
+
+        self.layers.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeToContents
+        )
+        for col in range(1, self.layers.columnCount()):
+            self.layers.horizontalHeader().setSectionResizeMode(
+                col, QHeaderView.Stretch
+            )
+
+        name_to_row = {name: i for i, name in enumerate(row_names)}
+
+        # Master project column.
+        for name, matches in target_layers.items():
+            row = name_to_row[name]
+            item = QTableWidgetItem(name)
+            item.setData(Qt.UserRole, matches[0])
+            self.layers.setItem(row, 0, item)
+
+        # Folder columns.
+        for source in self.sources:
+            name = source["layer"].name()
+            row = name_to_row[name]
+            col = self.folders.index(source["folder"]) + 1
+            self._set_layer_item(row, col, source["layer"])
+
+        # Store the source record on each cell. Duplicate same-name layers
+        # in one folder are not silently overwritten; the first is displayed
+        # and the user can see the total through the status below.
+        for row, name in enumerate(row_names):
+            occurrences = {}
+            for source in source_by_name.get(name, []):
+                key = (source["folder"], name)
+                occurrences[key] = occurrences.get(key, 0) + 1
+
+            for (folder, lname), count in occurrences.items():
+                if count <= 1:
+                    continue
+                col = self.folders.index(folder) + 1
+                item = self.layers.item(row, col)
+                if item:
+                    item.setToolTip(
+                        "%s：同一文件夹发现 %d 个同名图层；"
+                        "当前单元显示第一个。" % (lname, count)
+                    )
+
+    def add_folders(self):
+        # Non-native dialog permits selecting several directories with Ctrl.
+        dialog = QFileDialog(self, "选择文件夹")
+        dialog.setFileMode(QFileDialog.Directory)
+        dialog.setOption(QFileDialog.ShowDirsOnly, True)
+        dialog.setOption(QFileDialog.DontUseNativeDialog, True)
+        dialog.setWindowTitle("选择一个或多个文件夹")
+        try:
+            dialog.treeView().setSelectionMode(
+                QAbstractItemView.ExtendedSelection
+            )
+        except Exception:
+            pass
+
+        if dialog.exec_() != QDialog.Accepted:
+            return
+
+        paths = dialog.selectedFiles()
+        for path in paths:
+            if path not in self.folders:
+                try:
+                    scanned = self._scan_folder(path)
+                    self.folders.append(path)
+                    self.folder_enabled.append(True)
+                    for layer, source_path in scanned:
+                        self.sources.append({
+                            "folder": path,
+                            "path": source_path,
+                            "layer": layer
+                        })
+                except Exception as exc:
+                    QMessageBox.warning(
+                        self, "读取失败",
+                        path + "\n\n" + str(exc)
+                    )
+
+        self._rebuild_matrix()
+
+    def remove_selected_folder(self):
+        col = self.layers.currentColumn()
+        if col <= 0 or col > len(self.folders):
+            QMessageBox.information(
+                self, "提示", "请先点击要移除的文件夹列。"
+            )
+            return
+
+        folder = self.folders[col - 1]
+        self.folders.pop(col - 1)
+        self.folder_enabled.pop(col - 1)
+        self.sources = [
+            source for source in self.sources
+            if source["folder"] != folder
+        ]
+        self._rebuild_matrix()
+
+    def clear_folders(self):
+        self.folders.clear()
+        self.folder_enabled.clear()
+        self.sources.clear()
+        self.mappings.clear()
+        self.layers.clear()
+
+    def _header_clicked(self, section):
+        if section <= 0 or section > len(self.folders):
+            return
+        idx = section - 1
+        self.folder_enabled[idx] = not self.folder_enabled[idx]
+        self._rebuild_matrix()
+
+    def _cell_double_clicked(self, row, col):
+        if col <= 0 or col > len(self.folders):
+            return
+
+        item = self.layers.item(row, col)
+        if item is None:
+            return
+
+        name = item.data(Qt.UserRole + 1)
+        if not name:
+            return
+
+        target_layers = self._target_layers()
+        if name in target_layers:
+            QMessageBox.information(
+                self, "提示",
+                "“%s”已经与工程1同名图层自动对齐，无需设置。" % name
+            )
+            return
+
+        target_names = list(target_layers.keys())
+        if not target_names:
+            QMessageBox.warning(
+                self, "提示", "工程1目前没有可作为“移至”目标的矢量图层。"
+            )
+            return
+
+        dialog = MappingDialog(name, target_names, self)
+        if dialog.exec_() != QDialog.Accepted:
+            return
+
+        action, target_name = dialog.choice()
+        self.mappings[name] = {
+            "action": action,
+            "target": target_name
+        }
+
+        if action == "new":
+            try:
+                source = self._first_source_by_name(name)
+                self._create_target_layer(source["layer"], name)
+                QMessageBox.information(
+                    self, "已新增",
+                    "已在工程1新增图层：%s\n所有文件夹中的同名图层将统一汇总到该图层。"
+                    % name
+                )
+            except Exception as exc:
+                self.mappings.pop(name, None)
+                QMessageBox.warning(
+                    self, "新增失败", name + "\n\n" + str(exc)
+                )
+                return
+
+        self._rebuild_matrix()
+
+    def _first_source_by_name(self, name):
+        for source in self.sources:
+            if source["layer"].name() == name:
+                return source
+        raise RuntimeError("找不到源图层：" + name)
+
+    def _create_target_layer(self, source, name):
+        target_layers = self._target_layers()
+        if name in target_layers:
+            return target_layers[name][0]
+
+        geometry_map = {
+            0: "Point",
+            1: "LineString",
+            2: "Polygon",
+            3: "Unknown"
+        }
+        geom = geometry_map.get(source.geometryType(), "Unknown")
+        uri = "%s?crs=%s" % (
+            geom,
+            source.crs().authid() if source.crs().isValid() else "EPSG:4326"
+        )
+        layer = QgsVectorLayer(uri, name, "memory")
+        if not layer.isValid():
+            raise RuntimeError("无法创建新图层：" + name)
+
+        layer.dataProvider().addAttributes(list(source.fields()))
+        layer.updateFields()
+        QgsProject.instance().addMapLayer(layer)
+        return layer
 
     def _compatible(self, target, source):
         if target.geometryType() != source.geometryType():
@@ -187,6 +450,25 @@ class MergeSplitDialog(QDialog):
         target_names = {f.name() for f in target.fields()}
         source_names = {f.name() for f in source.fields()}
         return source_names.issubset(target_names)
+
+    def _resolve_target(self, source):
+        name = source["layer"].name()
+        targets = self._target_layers().get(name, [])
+        if targets:
+            return targets[0]
+
+        mapping = self.mappings.get(name)
+        if not mapping:
+            return None
+
+        if mapping["action"] == "move":
+            targets = self._target_layers().get(mapping["target"], [])
+            return targets[0] if targets else None
+
+        if mapping["action"] == "new":
+            return self._create_target_layer(source["layer"], name)
+
+        return None
 
     def _append_features(self, target, source):
         transform = None
@@ -238,11 +520,10 @@ class MergeSplitDialog(QDialog):
     def _checked_sources(self):
         result = []
         for source in self.sources:
-            item = source["item"]
-            root = item.parent()
-            if item.checkState(0) != Qt.Checked:
+            if source["folder"] not in self.folders:
                 continue
-            if root is not None and root.checkState(0) == Qt.Unchecked:
+            idx = self.folders.index(source["folder"])
+            if not self.folder_enabled[idx]:
                 continue
             result.append(source)
         return result
@@ -251,16 +532,17 @@ class MergeSplitDialog(QDialog):
         project = QgsProject.instance()
         if not project.mapLayers():
             QMessageBox.warning(
-                self, "提示", "当前工程没有图层，无法作为总文件。"
+                self, "提示", "当前工程没有图层，无法作为工程1。"
             )
             return
 
         selected = self._checked_sources()
         if not selected:
-            QMessageBox.warning(self, "提示", "请至少勾选一个来源图层。")
+            QMessageBox.warning(
+                self, "提示", "请至少勾选一个文件夹。"
+            )
             return
 
-        target_layers = self._target_layers()
         total_added = 0
         matched_layers = 0
         skipped_layers = []
@@ -270,31 +552,39 @@ class MergeSplitDialog(QDialog):
         self.progress.setValue(0)
 
         try:
-            for n, source_info in enumerate(selected):
-                source = source_info["layer"]
-                path = source_info["path"]
-                self.progress.setValue(int(n * 100 / max(1, len(selected))))
+            for n, source in enumerate(selected):
+                self.progress.setValue(
+                    int(n * 100 / max(1, len(selected)))
+                )
 
-                targets = target_layers.get(source.name(), [])
-                if not targets:
-                    skipped_layers.append(path + " :: " + source.name())
+                target = self._resolve_target(source)
+                if target is None:
+                    skipped_layers.append(
+                        "%s :: %s" %
+                        (Path(source["folder"]).name, source["layer"].name())
+                    )
                     continue
 
-                target = targets[0]
                 if not self._compatible(target, source):
                     errors.append(
-                        path + " :: " + source.name()
-                        + " → 字段/几何类型不兼容"
+                        "%s :: %s → 字段/几何类型不兼容" %
+                        (Path(source["folder"]).name, source["layer"].name())
                     )
                     continue
 
                 try:
-                    added = self._append_features(target, source)
-                    total_added += added
+                    total_added += self._append_features(
+                        target, source["layer"]
+                    )
                     matched_layers += 1
                 except Exception as exc:
                     errors.append(
-                        path + " :: " + source.name() + " → " + str(exc)
+                        "%s :: %s → %s" %
+                        (
+                            Path(source["folder"]).name,
+                            source["layer"].name(),
+                            str(exc)
+                        )
                     )
 
             project.setDirty(True)
@@ -302,20 +592,31 @@ class MergeSplitDialog(QDialog):
 
             message = (
                 "合并完成。\n\n"
-                "来源图层：%d\n"
-                "匹配图层：%d\n"
+                "参与文件夹：%d\n"
+                "参与图层：%d\n"
                 "新增要素：%d"
-                % (len(selected), matched_layers, total_added)
+                % (
+                    sum(1 for enabled in self.folder_enabled if enabled),
+                    len(selected),
+                    total_added
+                )
             )
+
             if skipped_layers:
-                message += "\n\n跳过无同名目标图层：%d" % len(skipped_layers)
+                message += (
+                    "\n\n未设置目标的图层：%d\n%s" %
+                    (len(skipped_layers), "\n".join(skipped_layers[:10]))
+                )
+
             if errors:
                 message += (
-                    "\n\n发生错误：%d\n%s"
-                    % (len(errors), "\n".join(errors[:10]))
+                    "\n\n发生错误：%d\n%s" %
+                    (len(errors), "\n".join(errors[:10]))
                 )
 
             QMessageBox.information(self, "Merge and Split", message)
             self.iface.mapCanvas().refresh()
+            self._refresh_target_label()
+            self._rebuild_matrix()
         finally:
             self.merge_btn.setEnabled(True)
