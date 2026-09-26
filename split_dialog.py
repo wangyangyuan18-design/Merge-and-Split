@@ -457,6 +457,9 @@ class SplitDialog(QDialog):
 
             new_project = QgsProject()
             new_project.setCrs(QgsProject.instance().crs())
+            # Store datasource paths relative to the temporary QGS file so the
+            # QGS and GPKG remain portable when packed together into QGZ.
+            new_project.setFilePathStorage(Qgis.FilePathType.Relative)
 
             used_names = set()
             first = True
