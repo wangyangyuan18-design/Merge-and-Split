@@ -436,6 +436,14 @@ class SplitDialog(QDialog):
                     used_names
                 )
                 path = out_dir / (base + ext)
+                if driver == "ESRI Shapefile":
+                    self._remove_shapefile_bundle(path.with_suffix(""))
+                else:
+                    try:
+                        if path.exists():
+                            path.unlink()
+                    except Exception:
+                        pass
                 self._write_layer(
                     layer, ids, path, driver,
                     layer_name=base, first_file=True
