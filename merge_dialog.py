@@ -266,13 +266,23 @@ class MergeSplitDialog(QDialog):
         return str(name or "").strip()
 
     @staticmethod
-    def _flat_wkb_type(layer):
-        """Return the WKB type without Z/M dimensions."""
+    def _safe_int(value):
         try:
-            from qgis.core import QgsWkbTypes
-            return QgsWkbTypes.flatType(layer.wkbType())
+            return int(value)
         except Exception:
-            return layer.wkbType()
+            return None
+
+    @staticmethod
+    def _normalized_name(name):
+        # SHP filenames determine source layer names. Ignore accidental
+        # leading/trailing spaces when matching against Engineering 1.
+        return str(name or "").strip()
+
+    @staticmethod
+    def _flat_wkb_type(layer):
+        """Return WKB type without Z/M dimensions."""
+        from qgis.core import QgsWkbTypes
+        return QgsWkbTypes.flatType(layer.wkbType())
 
     def _flat_wkb_name(self, layer):
         try:
@@ -282,12 +292,32 @@ class MergeSplitDialog(QDialog):
             return str(self._flat_wkb_type(layer))
 
     def _geometry_kind(self, layer):
-        """Return the normalized QGIS geometry family: Point/Line/Polygon."""
+        """Return stable primitive geometry family: 0=Point, 1=Line, 2=Polygon."""
         try:
             from qgis.core import QgsWkbTypes
-            return QgsWkbTypes.geometryType(self._flat_wkb_type(layer))
+            value = QgsWkbTypes.geometryType(self._flat_wkb_type(layer))
+            numeric = self._safe_int(value)
+            return numeric if numeric is not None else value
         except Exception:
-            return layer.geometryType()
+            value = layer.geometryType()
+            numeric = self._safe_int(value)
+            return numeric if numeric is not None else value
+
+    def _is_multi_geometry(self, layer):
+        try:
+            from qgis.core import QgsWkbTypes
+            value = QgsWkbTypes.isMultiType(self._flat_wkb_type(layer))
+            return bool(value)
+        except Exception:
+            return False
+
+    def _geometry_signature(self, layer):
+        # Primitive tuple avoids SIP enum equality issues:
+        # (geometry family, multipart flag). Z/M dimensions are ignored.
+        return (
+            self._safe_int(self._geometry_kind(layer)),
+            bool(self._is_multi_geometry(layer))
+        )
 
     def _geometry_type_name(self, layer):
         names = {
@@ -296,7 +326,7 @@ class MergeSplitDialog(QDialog):
             2: "面 (Polygon)",
             3: "未知 (Unknown)"
         }
-        kind = self._geometry_kind(layer)
+        kind = self._safe_int(self._geometry_kind(layer))
         return names.get(kind, str(kind))
 
     def _layer_source_name(self, layer, fallback=""):
@@ -720,32 +750,149 @@ class MergeSplitDialog(QDialog):
         return target
 
     def _geometry_debug(self, layer):
+        from qgis.core import QgsWkbTypes
+
         try:
-            from qgis.core import QgsWkbTypes
+            wkb_raw = self._safe_int(layer.wkbType())
+        except Exception:
+            wkb_raw = None
+
+        try:
+            geometry_raw = self._safe_int(layer.geometryType())
+        except Exception:
+            geometry_raw = None
+
+        try:
             wkb_name = QgsWkbTypes.displayString(layer.wkbType())
         except Exception:
             wkb_name = str(layer.wkbType())
 
+        flat_wkb = self._flat_wkb_type(layer)
+        try:
+            flat_raw = self._safe_int(flat_wkb)
+        except Exception:
+            flat_raw = None
+
+        try:
+            flat_name = QgsWkbTypes.displayString(flat_wkb)
+        except Exception:
+            flat_name = str(flat_wkb)
+
+        return {
+            "class": type(layer).__name__,
+            "id": layer.id(),
+            "name": layer.name(),
+            "name_repr": repr(layer.name()),
+            "provider": layer.providerType(),
+            "valid": layer.isValid(),
+            "source": layer.source(),
+            "crs": layer.crs().authid() if layer.crs().isValid() else "",
+            "geometryType_raw": geometry_raw,
+            "geometryType": str(self._geometry_type_name(layer)),
+            "wkb_raw": wkb_raw,
+            "wkb": wkb_name,
+            "flatWkb_raw": flat_raw,
+            "flatWkb": flat_name,
+            "multi": self._is_multi_geometry(layer),
+            "signature": self._geometry_signature(layer)
+        }
+
+    def _geometry_compare(self, target, source):
+        target_info = self._geometry_debug(target)
+        source_info = self._geometry_debug(source)
+
+        result = {
+            "target_valid": target_info["valid"],
+            "source_valid": source_info["valid"],
+            "family_equal": (
+                target_info["signature"][0]
+                == source_info["signature"][0]
+            ),
+            "multipart_equal": (
+                target_info["signature"][1]
+                == source_info["signature"][1]
+            ),
+            "flat_wkb_equal": (
+                target_info["flatWkb_raw"]
+                == source_info["flatWkb_raw"]
+            ),
+            "flat_wkb_name_equal": (
+                target_info["flatWkb"]
+                == source_info["flatWkb"]
+            )
+        }
+        result["compatible"] = (
+            result["target_valid"]
+            and result["source_valid"]
+            and result["family_equal"]
+            and result["multipart_equal"]
+        )
+        result["target"] = target_info
+        result["source"] = source_info
+        return result
+
+    def _format_geometry_diagnostic(self, compare):
+        t = compare["target"]
+        s = compare["source"]
+
         return (
-            "%s / WKB=%s / flatWKB=%s / geometryType=%s"
+            "判定链：\\n"
+            "工程1目标：%s\\n"
+            "  id=%s\\n"
+            "  name=%s\\n"
+            "  source=%s\\n"
+            "  provider=%s\\n"
+            "  CRS=%s\\n"
+            "  geometryType=%s (raw=%s)\\n"
+            "  WKB=%s (raw=%s)\\n"
+            "  flatWKB=%s (raw=%s)\\n"
+            "  multi=%s\\n"
+            "  signature=%s\\n\\n"
+            "源图层：%s\\n"
+            "  id=%s\\n"
+            "  name=%s\\n"
+            "  source=%s\\n"
+            "  provider=%s\\n"
+            "  CRS=%s\\n"
+            "  geometryType=%s (raw=%s)\\n"
+            "  WKB=%s (raw=%s)\\n"
+            "  flatWKB=%s (raw=%s)\\n"
+            "  multi=%s\\n"
+            "  signature=%s\\n\\n"
+            "逐项比较：\\n"
+            "  目标有效：%s\\n"
+            "  源有效：%s\\n"
+            "  几何大类相同：%s\\n"
+            "  单/多部件相同：%s\\n"
+            "  flatWKB 数值相同：%s\\n"
+            "  flatWKB 名称相同：%s\\n"
+            "最终兼容：%s"
             % (
-                self._geometry_type_name(layer),
-                wkb_name,
-                self._flat_wkb_name(layer),
-                str(self._geometry_kind(layer))
+                t["name"], t["id"], repr(t["name"]), t["source"],
+                t["provider"], t["crs"], t["geometryType"],
+                t["geometryType_raw"], t["wkb"], t["wkb_raw"],
+                t["flatWkb"], t["flatWkb_raw"], t["multi"],
+                t["signature"],
+                s["name"], s["id"], repr(s["name"]), s["source"],
+                s["provider"], s["crs"], s["geometryType"],
+                s["geometryType_raw"], s["wkb"], s["wkb_raw"],
+                s["flatWkb"], s["flatWkb_raw"], s["multi"],
+                s["signature"],
+                compare["target_valid"], compare["source_valid"],
+                compare["family_equal"], compare["multipart_equal"],
+                compare["flat_wkb_equal"],
+                compare["flat_wkb_name_equal"],
+                compare["compatible"]
             )
         )
 
     def _compatible(self, target, source):
-        # Geometry matching intentionally ignores Z/M dimensions.
-        # Point == PointZ, MultiPolygon == MultiPolygonZ, etc.
-        # Multipart and singlepart remain different geometry types.
         target = self._first_target(target)
         if not isinstance(target, QgsVectorLayer):
             return False
         if not isinstance(source, QgsVectorLayer):
             return False
-        return self._flat_wkb_name(target) == self._flat_wkb_name(source)
+        return self._geometry_compare(target, source)["compatible"]
 
     def _resolve_target(self, source):
         name = self._normalized_name(source["layer"].name())
@@ -865,16 +1012,14 @@ class MergeSplitDialog(QDialog):
                     )
                     continue
 
-                if not self._compatible(target, source):
+                compare = self._geometry_compare(target, source["layer"])
+                if not compare["compatible"]:
                     errors.append(
-                        "%s :: %s → 几何类型不兼容\n"
-                        "工程1：%s\n"
-                        "源图层：%s" %
+                        "%s :: %s → 几何类型不兼容\\n%s" %
                         (
                             Path(source["folder"]).name,
                             source["layer"].name(),
-                            self._geometry_debug(target),
-                            self._geometry_debug(source["layer"])
+                            self._format_geometry_diagnostic(compare)
                         )
                     )
                     continue
@@ -884,12 +1029,13 @@ class MergeSplitDialog(QDialog):
                         target, source["layer"]
                     )
                 except Exception as exc:
+                    compare_text = self._format_geometry_diagnostic(compare)
                     errors.append(
                         "%s :: %s → %s" %
                         (
                             Path(source["folder"]).name,
                             source["layer"].name(),
-                            str(exc)
+                            str(exc) + "\\n" + compare_text
                         )
                     )
 
@@ -920,6 +1066,20 @@ class MergeSplitDialog(QDialog):
                     total_added
                 )
             )
+
+            if errors:
+                # Always show how many geometry checks were performed.
+                message += (
+                    "\\n\\n几何诊断：已执行 %d 个目标匹配，其中 %d 个通过几何检查。"
+                    % (
+                        len([s for s in selected if s["layer"].id() in self._source_target_map]),
+                        len([s for s in selected if s["layer"].id() in self._source_target_map])
+                        - len([
+                            e for e in errors
+                            if "几何类型不兼容" in e
+                        ])
+                    )
+                )
 
             if skipped_layers:
                 message += (
