@@ -21,9 +21,9 @@ jobs:
         shell: bash
         run: |
           set -e
-          python -m py_compile merge_dialog.py merge_split.py __init__.py
+          python -m py_compile merge_dialog.py merge_split.py split_dialog.py __init__.py
           grep -Fxq 'PLUGIN_VERSION = "1.0.8"' merge_dialog.py
-          grep -Fxq 'version=1.0.8' metadata.txt
+          grep -Fxq 'version=1.1.2' metadata.txt
           ! grep -n '\.clone()' merge_dialog.py
 
       - name: Prepare QGIS plugin package
