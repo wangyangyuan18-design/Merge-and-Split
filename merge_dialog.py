@@ -1092,6 +1092,67 @@ class MergeSplitDialog(QDialog):
             "type_conflicts": type_conflicts
         }
 
+    @staticmethod
+    def _coerce_field_value(value, target_field):
+        """
+        Map a source value to the Engineering 1 target field type.
+        Schema differences never reject the layer itself:
+          - target-only field -> NULL
+          - source-only field -> ignored
+          - same-name field -> best-effort type conversion
+        A value which cannot be represented by the target numeric/boolean
+        type becomes NULL instead of aborting the whole layer merge.
+        """
+        if value is None:
+            return value, False, False
+
+        type_name = str(target_field.typeName() or "").strip().lower()
+
+        if any(token in type_name for token in ("integer64", "bigint", "integer", "int")):
+            try:
+                if isinstance(value, bool):
+                    return int(value), True, False
+                if isinstance(value, int):
+                    return value, False, False
+                if isinstance(value, float):
+                    return int(value), True, False
+                return int(str(value).strip()), True, False
+            except Exception:
+                return None, True, True
+
+        if any(token in type_name for token in ("double", "real", "float", "numeric", "decimal")):
+            try:
+                if isinstance(value, bool):
+                    return float(int(value)), True, False
+                if isinstance(value, (int, float)):
+                    return float(value), not isinstance(value, float), False
+                return float(str(value).strip()), True, False
+            except Exception:
+                return None, True, True
+
+        if "bool" in type_name:
+            if isinstance(value, bool):
+                return value, False, False
+            if isinstance(value, (int, float)):
+                return bool(value), True, False
+            normalized = str(value).strip().lower()
+            if normalized in {"1", "true", "t", "yes", "y"}:
+                return True, True, False
+            if normalized in {"0", "false", "f", "no", "n"}:
+                return False, True, False
+            return None, True, True
+
+        if any(token in type_name for token in ("string", "text", "varchar", "char")):
+            if isinstance(value, str):
+                return value, False, False
+            try:
+                return str(value), True, False
+            except Exception:
+                return None, True, True
+
+        # Provider-native date/time/blob/custom values remain intact.
+        return value, False, False
+
     def _prepare_geometry_for_target(self, geom, target, source):
         if geom is None or geom.isNull():
             return geom, False
@@ -1148,6 +1209,7 @@ class MergeSplitDialog(QDialog):
                 started_editing = True
 
             count = 0
+            conversion_log_count = 0
             for src_feat in source.getFeatures():
                 current_feature_id = src_feat.id()
                 feat = QgsFeature(fields)
@@ -1187,16 +1249,48 @@ class MergeSplitDialog(QDialog):
                 values = []
                 for field in fields:
                     idx = source_index.get(field.name())
-                    values.append(
-                        src_feat[idx] if idx is not None else None
+                    if idx is None:
+                        values.append(None)
+                        continue
+
+                    raw_value = src_feat[idx]
+                    converted, changed, failed = self._coerce_field_value(
+                        raw_value, field
                     )
+                    if changed and conversion_log_count < 10:
+                        self._log(
+                            "[ATTRIBUTE CONVERT] %s feature=%s field=%r "
+                            "source_value=%r -> %r; target_type=%s%s"
+                            % (
+                                source.name(),
+                                src_feat.id(),
+                                field.name(),
+                                raw_value,
+                                converted,
+                                field.typeName(),
+                                " [UNCONVERTIBLE->NULL]" if failed else ""
+                            ),
+                            Qgis.Warning if failed else Qgis.Info
+                        )
+                        conversion_log_count += 1
+                    values.append(converted)
+
                 feat.setAttributes(values)
 
                 phase = "ADD_FEATURE"
                 if not target.addFeature(feat):
+                    provider_error = ""
+                    try:
+                        provider_error = str(target.dataProvider().lastError())
+                    except Exception:
+                        provider_error = ""
                     raise RuntimeError(
-                        "写入图层失败，feature=%s，target=%s"
-                        % (src_feat.id(), target.name())
+                        "写入图层失败，feature=%s，target=%s%s"
+                        % (
+                            src_feat.id(),
+                            target.name(),
+                            ("；provider=" + provider_error) if provider_error else ""
+                        )
                     )
                 count += 1
 
@@ -1253,7 +1347,6 @@ class MergeSplitDialog(QDialog):
             return
 
         total_added = 0
-        original_target_names = set(self._target_layers().keys())
         resolved_count = 0
         geometry_pass_count = 0
         geometry_fail_count = 0
@@ -1473,6 +1566,7 @@ class MergeSplitDialog(QDialog):
                 "写入失败=%d\n"
                 "参与图层名称=%s\n"
                 "未设置目标图层名称=%s\n"
+                "注：字段类型冲突按目标字段尝试转换，无法转换的值写 NULL\n"
                 "新增要素=%d"
                 % (
                     PLUGIN_VERSION,
