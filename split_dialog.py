@@ -34,7 +34,7 @@ from qgis.core import (
 )
 
 
-SPLIT_VERSION = "1.1.0"
+SPLIT_VERSION = "1.1.1"
 
 
 class PolygonSplitTool(QgsMapTool):
@@ -180,14 +180,13 @@ class SplitDialog(QDialog):
         file_row.addWidget(QLabel("文件格式："))
         self.format_combo = QComboBox()
         self.format_combo.addItem("ESRI Shapefile (*.shp)", "ESRI Shapefile")
-        self.format_combo.addItem("GeoPackage (*.gpkg)", "GPKG")
         self.format_combo.addItem("GeoJSON (*.geojson)", "GeoJSON")
         self.format_combo.addItem("KML (*.kml)", "KML")
         self.format_combo.addItem("GML (*.gml)", "GML")
         file_row.addWidget(self.format_combo, 1)
         layout.addLayout(file_row)
 
-        self.folder_label = QLabel("输出文件夹：未选择")
+        self.folder_label = QLabel("输出文件夹：默认原工程目录")
         self.folder_label.setWordWrap(True)
         layout.addWidget(self.folder_label)
 
@@ -227,12 +226,12 @@ class SplitDialog(QDialog):
             )
         elif self.qgz_radio.isChecked():
             self.action_hint.setText(
-                "QGZ 模式：把区域内要素复制到一个独立的 QGZ 工程，"
-                "不会修改当前工程。输出为自包含压缩工程。"
+                "QGZ 模式：自动使用原工程目录和原工程名，生成 原工程名_split.qgz。"
+                "QGZ 内只使用 SHP 数据，不创建 GPKG；同时在原工程目录同步生成同名 SHP 数据文件。"
             )
         else:
             self.action_hint.setText(
-                "文件模式：把区域内要素按所选格式导出到指定文件夹。"
+                "文件模式：默认输出到原工程目录，并使用 原工程名_split_图层名 作为文件名。"
                 "只有存在相交要素的图层才会输出。"
             )
 
@@ -368,66 +367,120 @@ class SplitDialog(QDialog):
         finally:
             layer.selectByIds(selected_before)
 
+    def _project_output_info(self):
+        project_path = Path(QgsProject.instance().fileName())
+        if project_path.name:
+            return project_path.parent, self._safe_filename(project_path.stem)
+        return Path.cwd(), "project"
+
     def _export_files(self, matches, folder, driver):
         out_dir = Path(folder)
         out_dir.mkdir(parents=True, exist_ok=True)
-
+        _, project_stem = self._project_output_info()
         exported = 0
         total = 0
         errors = []
         used_names = set()
-
-        if driver == "GPKG":
-            gpkg_path = out_dir / "split_result.gpkg"
-            first = True
-            for layer, ids in matches:
-                try:
-                    layer_name = self._unique_name(
-                        self._safe_filename(layer.name()), used_names
-                    )
-                    self._write_layer(
-                        layer, ids, gpkg_path, driver,
-                        layer_name=layer_name, first_file=first
-                    )
-                    first = False
-                    exported += 1
-                    total += len(ids)
-                except Exception as exc:
-                    errors.append("%s: %s" % (layer.name(), exc))
-        else:
-            extensions = {
-                "ESRI Shapefile": ".shp",
-                "GeoJSON": ".geojson",
-                "KML": ".kml",
-                "GML": ".gml",
-            }
-            ext = extensions[driver]
-            for layer, ids in matches:
-                try:
-                    base = self._unique_name(
-                        self._safe_filename(layer.name()), used_names
-                    )
-                    path = out_dir / (base + ext)
-                    self._write_layer(
-                        layer, ids, path, driver,
-                        layer_name=base, first_file=True
-                    )
-                    exported += 1
-                    total += len(ids)
-                except Exception as exc:
-                    errors.append("%s: %s" % (layer.name(), exc))
-
+        extensions = {
+            "ESRI Shapefile": ".shp",
+            "GeoJSON": ".geojson",
+            "KML": ".kml",
+            "GML": ".gml",
+        }
+        ext = extensions[driver]
+        for layer, ids in matches:
+            try:
+                base = self._unique_name(
+                    "%s_split_%s" % (
+                        project_stem, self._safe_filename(layer.name())
+                    ),
+                    used_names
+                )
+                path = out_dir / (base + ext)
+                self._write_layer(
+                    layer, ids, path, driver,
+                    layer_name=base, first_file=True
+                )
+                exported += 1
+                total += len(ids)
+            except Exception as exc:
+                errors.append("%s: %s" % (layer.name(), exc))
         return exported, total, errors
 
     @staticmethod
-    def _unique_name(base, used):
-        candidate = base or "layer"
-        i = 2
-        while candidate.lower() in used:
-            candidate = "%s_%d" % (base, i)
-            i += 1
-        used.add(candidate.lower())
-        return candidate
+    def _copy_shapefile_bundle(source_stem, target_stem):
+        source_stem = Path(source_stem)
+        target_stem = Path(target_stem)
+        target_stem.parent.mkdir(parents=True, exist_ok=True)
+        copied = []
+        for source in sorted(source_stem.parent.glob(source_stem.name + ".*")):
+            target = target_stem.parent / (target_stem.name + source.suffix)
+            shutil.copy2(source, target)
+            copied.append(target)
+        if not target_stem.with_suffix(".shp").exists():
+            raise RuntimeError(
+                "Shapefile 输出不完整：%s" % source_stem.name
+            )
+        return copied
+
+    def _create_qgz(self, matches, output_path):
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        project_dir, project_stem = self._project_output_info()
+        temp_dir = Path(tempfile.mkdtemp(prefix="merge_split_qgz_"))
+        try:
+            qgs_path = temp_dir / "split_project.qgs"
+            new_project = QgsProject()
+            new_project.setCrs(QgsProject.instance().crs())
+            new_project.setFilePathStorage(Qgis.FilePathType.Relative)
+            used_names = set()
+            created = []
+            external_bundles = []
+            total = 0
+
+            for layer, ids in matches:
+                layer_name = self._unique_name(
+                    "%s_split_%s" % (
+                        project_stem, self._safe_filename(layer.name())
+                    ),
+                    used_names
+                )
+                temp_shp = temp_dir / (layer_name + ".shp")
+                self._write_layer(
+                    layer, ids, temp_shp, "ESRI Shapefile",
+                    layer_name=layer_name, first_file=True
+                )
+                external_stem = project_dir / layer_name
+                self._copy_shapefile_bundle(temp_shp, external_stem)
+                external_bundles.append(external_stem)
+
+                copied = QgsVectorLayer(str(temp_shp), layer.name(), "ogr")
+                if not copied.isValid():
+                    raise RuntimeError(
+                        "无法重新打开输出 SHP 图层：%s" % layer.name()
+                    )
+                self._copy_layer_style(layer, copied)
+                new_project.addMapLayer(copied)
+                created.append(copied)
+                total += len(ids)
+
+            if not created:
+                raise RuntimeError("区域内没有可输出的要素。")
+            if not new_project.write(str(qgs_path)):
+                raise RuntimeError(
+                    "QGIS 工程写入失败：" + new_project.error()
+                )
+            if output_path.exists():
+                output_path.unlink()
+            with zipfile.ZipFile(
+                output_path, "w", compression=zipfile.ZIP_DEFLATED
+            ) as archive:
+                for item in sorted(temp_dir.iterdir()):
+                    if item.is_file():
+                        archive.write(item, item.name)
+            return len(created), total, external_bundles
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
     def _copy_layer_style(self, source, target):
         try:
@@ -557,19 +610,19 @@ class SplitDialog(QDialog):
                 return
 
             if self.qgz_radio.isChecked():
-                path, _ = QFileDialog.getSaveFileName(
-                    self,
-                    "保存拆分 QGZ 工程",
-                    "",
-                    "QGIS Project (*.qgz)"
-                )
-                if not path:
+                project_dir, project_stem = self._project_output_info()
+                if not QgsProject.instance().fileName():
+                    QMessageBox.warning(
+                        self,
+                        "Merge and Split",
+                        "当前工程尚未保存。请先保存原工程，再生成原工程名_split.qgz。"
+                    )
                     return
-                if not path.lower().endswith(".qgz"):
-                    path += ".qgz"
+
+                path = project_dir / ("%s_split.qgz" % project_stem)
 
                 self.progress.setValue(20)
-                layers, total = self._create_qgz(matches, path)
+                layers, total, shp_bundles = self._create_qgz(matches, path)
                 self.progress.setValue(100)
                 self._log(
                     "[SPLIT QGZ] path=%s layers=%d features=%d"
@@ -581,21 +634,26 @@ class SplitDialog(QDialog):
                     "QGZ 拆分完成。\n\n"
                     "图层：%d\n"
                     "要素：%d\n"
-                    "文件：%s"
-                    % (layers, total, path)
+                    "QGZ：%s\n"
+                    "同步 SHP：%d 个图层"
+                    % (layers, total, path, len(shp_bundles))
                 )
                 self.polygon = None
                 return
 
-            folder = self.folder_label.text().replace(
+            project_dir, _ = self._project_output_info()
+            folder_text = self.folder_label.text().replace(
                 "输出文件夹：", "", 1
             ).strip()
-            if not folder or folder == "未选择" or not Path(folder).is_dir():
+            folder = str(project_dir) if (
+                not folder_text or folder_text == "默认原工程目录"
+            ) else folder_text
+            if not Path(folder).is_dir():
                 self.choose_folder()
                 folder = self.folder_label.text().replace(
                     "输出文件夹：", "", 1
                 ).strip()
-            if not folder or folder == "未选择" or not Path(folder).is_dir():
+            if not folder or folder in ("未选择", "默认原工程目录") or not Path(folder).is_dir():
                 return
 
             driver = self.format_combo.currentData()
