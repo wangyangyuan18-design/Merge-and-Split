@@ -208,6 +208,15 @@ class MergeSplitDialog(QDialog):
                 continue
         return result
 
+    def _geometry_type_name(self, layer):
+        names = {
+            0: "点 (Point)",
+            1: "线 (LineString)",
+            2: "面 (Polygon)",
+            3: "未知 (Unknown)"
+        }
+        return names.get(layer.geometryType(), str(layer.geometryType()))
+
     def _cell_text(self, layer):
         try:
             count = self._feature_counts.get(layer.id())
@@ -218,16 +227,24 @@ class MergeSplitDialog(QDialog):
         except Exception:
             return "%s [读取失败]" % layer.name(), -1
 
-    def _set_layer_item(self, row, col, layer):
+    def _set_layer_item(self, row, col, layer, geometry_mismatch=False, target=None):
         text, count = self._cell_text(layer)
         if count >= 0:
             text = self._display_name(layer) + " [%d]" % count
+        if geometry_mismatch:
+            text += "  ⚠ 几何类型不同"
         item = QTableWidgetItem(text)
         item.setData(Qt.UserRole, layer)
         item.setData(Qt.UserRole + 1, layer.name())
         item.setData(Qt.UserRole + 2, count)
+        item.setData(Qt.UserRole + 3, geometry_mismatch)
 
-        if count == 0:
+        if geometry_mismatch:
+            item.setToolTip(
+                "工程1与该源图层同名，但几何类型不同，不能直接合并。"
+            )
+            item.setForeground(Qt.red)
+        elif count == 0:
             item.setForeground(Qt.gray)
 
         self.layers.setItem(row, col, item)
@@ -306,7 +323,19 @@ class MergeSplitDialog(QDialog):
             if key in seen:
                 continue
             seen.add(key)
-            self._set_layer_item(row, col, source["layer"])
+            target = None
+            target_matches = target_layers.get(row_name, [])
+            if target_matches:
+                target = self._first_target(target_matches)
+            geometry_mismatch = (
+                target is not None
+                and target.geometryType() != source["layer"].geometryType()
+            )
+            self._set_layer_item(
+                row, col, source["layer"],
+                geometry_mismatch=geometry_mismatch,
+                target=target
+            )
 
         # Keep columns compact. Avoid QHeaderView.setSectionResizeMode:
         # QGIS 3.40.14 / Qt 5.15.13 can crash during plugin startup.
@@ -413,10 +442,29 @@ class MergeSplitDialog(QDialog):
 
         target_layers = self._target_layers()
         if name in target_layers:
-            QMessageBox.information(
-                self, "提示",
-                "“%s”已经与工程1同名图层自动对齐，无需设置。" % name
-            )
+            target = self._first_target(target_layers[name])
+            source_layer = item.data(Qt.UserRole)
+            if (
+                isinstance(target, QgsVectorLayer)
+                and isinstance(source_layer, QgsVectorLayer)
+                and target.geometryType() != source_layer.geometryType()
+            ):
+                QMessageBox.warning(
+                    self, "几何类型不兼容",
+                    "“%s”与工程1同名，但几何类型不同。\\n\\n"
+                    "工程1：%s\\n源图层：%s\\n\\n"
+                    "该图层不能直接合并，也不能通过字段映射解决。" %
+                    (
+                        name,
+                        self._geometry_type_name(target),
+                        self._geometry_type_name(source_layer)
+                    )
+                )
+            else:
+                QMessageBox.information(
+                    self, "提示",
+                    "“%s”已经与工程1同名图层自动对齐，无需设置。" % name
+                )
             return
 
         source_layer = item.data(Qt.UserRole)
@@ -525,18 +573,16 @@ class MergeSplitDialog(QDialog):
         return target
 
     def _compatible(self, target, source):
-        # Compatibility must always operate on one QgsVectorLayer.
-        # Older mapping paths may still pass the name->layers dictionary.
+        # Merge semantics are intentionally the same as QGIS copy/paste:
+        # geometry type must match, while fields are mapped by field name.
+        # Engineering 1 is the master schema. Fields missing from the source
+        # become NULL; source-only fields are ignored.
         target = self._first_target(target)
         if not isinstance(target, QgsVectorLayer):
             return False
         if not isinstance(source, QgsVectorLayer):
             return False
-        if target.geometryType() != source.geometryType():
-            return False
-        target_names = {f.name() for f in target.fields()}
-        source_names = {f.name() for f in source.fields()}
-        return source_names.issubset(target_names)
+        return target.geometryType() == source.geometryType()
 
     def _resolve_target(self, source):
         name = source["layer"].name()
