@@ -106,7 +106,7 @@ class MergeSplitDialog(QDialog):
         self._created_target_names = set()
         self._diagnostic_lines = []
         self._last_resolution_error = ""
-        self.setWindowTitle("Merge and Split - 合并 v1.0.6")
+        self.setWindowTitle("Merge and Split - 合并 v1.0.7")
         self.resize(1250, 700)
         self._build_ui()
 
@@ -1119,6 +1119,9 @@ class MergeSplitDialog(QDialog):
         return geom, changed
 
     def _append_features(self, target, source):
+        phase = "START_EDIT"
+        current_feature_id = None
+
         transform = None
         if (
             target.crs().isValid()
@@ -1137,26 +1140,32 @@ class MergeSplitDialog(QDialog):
 
         try:
             if not was_editing:
+                phase = "START_EDIT"
                 if not target.startEditing():
                     raise RuntimeError("无法进入编辑状态：" + target.name())
                 started_editing = True
 
             count = 0
             for src_feat in source.getFeatures():
+                current_feature_id = src_feat.id()
                 feat = QgsFeature(fields)
 
                 geom = src_feat.geometry()
                 if geom and not geom.isNull():
+                    phase = "GEOMETRY_CLONE"
                     geom = geom.clone()
+
                     if transform:
+                        phase = "CRS_TRANSFORM"
                         result = geom.transform(transform)
                         result_code = self._safe_int(result)
-                        if result_code not in (0,):
+                        if result_code is not None and result_code != 0:
                             raise RuntimeError(
                                 "几何 CRS 转换失败，feature=%s，result=%s"
                                 % (src_feat.id(), result)
                             )
 
+                    phase = "GEOMETRY_DIMENSION"
                     geom, dimension_changed = self._prepare_geometry_for_target(
                         geom, target, source
                     )
@@ -1172,6 +1181,7 @@ class MergeSplitDialog(QDialog):
                         )
                     feat.setGeometry(geom)
 
+                phase = "ATTRIBUTE_MAPPING"
                 values = []
                 for field in fields:
                     idx = source_index.get(field.name())
@@ -1180,6 +1190,7 @@ class MergeSplitDialog(QDialog):
                     )
                 feat.setAttributes(values)
 
+                phase = "ADD_FEATURE"
                 if not target.addFeature(feat):
                     raise RuntimeError(
                         "写入图层失败，feature=%s，target=%s"
@@ -1188,6 +1199,7 @@ class MergeSplitDialog(QDialog):
                 count += 1
 
             if started_editing:
+                phase = "COMMIT"
                 if not target.commitChanges():
                     commit_errors = "; ".join(target.commitErrors())
                     raise RuntimeError(
@@ -1197,10 +1209,20 @@ class MergeSplitDialog(QDialog):
 
             return count
 
-        except Exception:
+        except Exception as exc:
             if started_editing and target.isEditable():
                 target.rollBack()
-            raise
+
+            raise RuntimeError(
+                "失败阶段=%s；feature=%s；target=%s；source=%s；原因=%s"
+                % (
+                    phase,
+                    current_feature_id,
+                    target.name(),
+                    source.name(),
+                    str(exc)
+                )
+            ) from exc
 
     def _checked_sources(self):
         result = []
