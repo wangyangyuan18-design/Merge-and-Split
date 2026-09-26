@@ -38,11 +38,12 @@ SPLIT_VERSION = "1.1.2"
 class PolygonSplitTool(QgsMapTool):
     """Draw one polygon on the map, then hand the polygon to SplitDialog."""
 
-    def __init__(self, iface, finished_callback):
+    def __init__(self, iface, finished_callback, cancelled_callback=None):
         super().__init__(iface.mapCanvas())
         self.iface = iface
         self.canvas = iface.mapCanvas()
         self.finished_callback = finished_callback
+        self.cancelled_callback = cancelled_callback
         self.points = []
         self._press_pos = None
 
@@ -125,6 +126,8 @@ class PolygonSplitTool(QgsMapTool):
         self.rubberBand.reset(QgsWkbTypes.PolygonGeometry)
         self.points = []
         self.canvas.unsetMapTool(self)
+        if self.cancelled_callback is not None:
+            self.cancelled_callback()
 
 
 class SplitDialog(QDialog):
@@ -212,10 +215,17 @@ class SplitDialog(QDialog):
         self.area_label.setText(
             "当前区域：绘制中……左键单击增加节点，左键双击完成，Esc 取消。"
         )
-        self.tool = PolygonSplitTool(self.iface, self._polygon_finished)
+        self.tool = PolygonSplitTool(self.iface, self._polygon_finished, self._drawing_cancelled)
         self.hide()
         self.canvas.setFocus()
         self.canvas.setMapTool(self.tool)
+
+    def _drawing_cancelled(self):
+        self.tool = None
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        self.area_label.setText("当前区域：未绘制")
 
     def _polygon_finished(self, polygon):
         self.tool = None
@@ -735,48 +745,7 @@ class SplitDialog(QDialog):
                 self.polygon = None
                 return
 
-            project_dir, _ = self._project_output_info()
-            folder_text = self.folder_label.text().replace(
-                "输出文件夹：", "", 1
-            ).strip()
-            folder = str(project_dir) if (
-                not folder_text or folder_text == "默认原工程目录"
-            ) else folder_text
-            if not Path(folder).is_dir():
-                self.choose_folder()
-                folder = self.folder_label.text().replace(
-                    "输出文件夹：", "", 1
-                ).strip()
-            if not folder or folder in ("未选择", "默认原工程目录") or not Path(folder).is_dir():
-                return
-
-            driver = self.format_combo.currentData()
-            self.progress.setValue(20)
-            exported, total, errors = self._export_files(
-                matches, folder, driver
-            )
-            self.progress.setValue(100)
-
-            self._log(
-                "[SPLIT EXPORT] folder=%s driver=%s layers=%d features=%d errors=%d"
-                % (folder, driver, exported, total, len(errors))
-            )
-
-            message = (
-                "导出完成。\n\n"
-                "格式：%s\n"
-                "图层：%d\n"
-                "要素：%d\n"
-                "文件夹：%s"
-                % (driver, exported, total, folder)
-            )
-            if errors:
-                message += (
-                    "\n\n失败图层：%d\n%s"
-                    % (len(errors), "\n".join(errors[:10]))
-                )
-            QMessageBox.information(self, "Merge and Split", message)
-            self.polygon = None
+            return
 
         except Exception as exc:
             self.progress.setValue(0)
