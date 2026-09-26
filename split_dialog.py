@@ -269,28 +269,70 @@ class SplitDialog(QDialog):
             self.tool = None
         super().closeEvent(event)
 
+    def _polygon_for_layer(self, layer):
+        """Transform the drawn polygon from canvas CRS to the layer CRS."""
+        polygon = QgsGeometry(self.polygon)
+        canvas_crs = self.canvas.mapSettings().destinationCrs()
+        layer_crs = layer.crs()
+        if (
+            not canvas_crs.isValid()
+            or not layer_crs.isValid()
+            or canvas_crs == layer_crs
+        ):
+            return polygon
+
+        transform = QgsCoordinateTransform(
+            canvas_crs, layer_crs, QgsProject.instance()
+        )
+        result = polygon.transform(transform)
+        try:
+            code = int(result)
+        except Exception:
+            code = None
+        if code is not None and code != 0:
+            raise RuntimeError(
+                "区域 CRS 转换失败：%s -> %s (code=%s)"
+                % (canvas_crs.authid(), layer_crs.authid(), code)
+            )
+        return polygon
+
     def _candidate_ids(self, layer):
-        request = QgsFeatureRequest(self.polygon.boundingBox())
-        ids = []
-        for feature in layer.getFeatures(request):
-            geom = feature.geometry()
-            if geom is None or geom.isEmpty():
-                continue
-            try:
-                if geom.intersects(self.polygon):
-                    ids.append(feature.id())
-            except Exception:
-                continue
-        return ids
+        try:
+            polygon = self._polygon_for_layer(layer)
+            request = QgsFeatureRequest(polygon.boundingBox())
+            ids = []
+            for feature in layer.getFeatures(request):
+                geom = feature.geometry()
+                if geom is None or geom.isEmpty():
+                    continue
+                try:
+                    if geom.intersects(polygon):
+                        ids.append(feature.id())
+                except Exception:
+                    continue
+            return ids
+        except Exception as exc:
+            self._log(
+                "[SPLIT SCAN ERROR] layer=%s source=%s reason=%s"
+                % (layer.name(), layer.source(), exc),
+                Qgis.Warning
+            )
+            return []
 
     def _scan_matches(self):
         result = []
+        vector_count = 0
         for layer in QgsProject.instance().mapLayers().values():
             if not isinstance(layer, QgsVectorLayer):
                 continue
+            vector_count += 1
             ids = self._candidate_ids(layer)
             if ids:
                 result.append((layer, ids))
+        self._log(
+            "[SPLIT SCAN] vector_layers=%d matched_layers=%d matched_features=%d"
+            % (vector_count, len(result), sum(len(ids) for _, ids in result))
+        )
         return result
 
     def _confirm_delete(self, matches):
