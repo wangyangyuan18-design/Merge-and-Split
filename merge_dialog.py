@@ -467,7 +467,7 @@ class MergeSplitDialog(QDialog):
             if (
                 isinstance(target, QgsVectorLayer)
                 and isinstance(source_layer, QgsVectorLayer)
-                and target.geometryType() != source_layer.geometryType()
+                and self._geometry_kind(target) != self._geometry_kind(source_layer)
             ):
                 QMessageBox.warning(
                     self, "几何类型不兼容",
