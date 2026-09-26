@@ -261,22 +261,47 @@ class MergeSplitDialog(QDialog):
         kind = self._geometry_kind(layer)
         return names.get(kind, str(kind))
 
-    def _cell_text(self, layer):
+    def _layer_source_name(self, layer, fallback=""):
+        try:
+            source = layer.source()
+            if source:
+                source_path = Path(source.split("|")[0])
+                if source_path.name:
+                    return source_path.name
+        except Exception:
+            pass
+        return fallback or "工程内图层"
+
+    def _cell_text(self, layer, source_file=None, show_details=True):
         try:
             count = self._feature_counts.get(layer.id())
             if count is None:
                 count = layer.featureCount()
                 self._feature_counts[layer.id()] = count
-            return "%s [%d]" % (layer.name(), count), count
+
+            name = self._display_name(layer)
+            if not show_details:
+                return "%s [%d]" % (name, count), count
+
+            geometry = self._geometry_type_name(layer)
+            source_name = self._layer_source_name(layer, source_file)
+            text = (
+                "%s [%d]\\n"
+                "几何：%s\\n"
+                "源文件：%s"
+                % (name, count, geometry, source_name)
+            )
+            return text, count
         except Exception:
             return "%s [读取失败]" % layer.name(), -1
 
-    def _set_layer_item(self, row, col, layer, geometry_mismatch=False, target=None):
-        text, count = self._cell_text(layer)
-        if count >= 0:
-            text = self._display_name(layer) + " [%d]" % count
+    def _set_layer_item(
+        self, row, col, layer, geometry_mismatch=False,
+        target=None, source_file=None
+    ):
+        text, count = self._cell_text(layer, source_file=source_file)
         if geometry_mismatch:
-            text += "  ⚠ 几何类型不同"
+            text += "\\n⚠ 几何类型不同"
         item = QTableWidgetItem(text)
         item.setData(Qt.UserRole, layer)
         item.setData(Qt.UserRole + 1, layer.name())
@@ -344,8 +369,10 @@ class MergeSplitDialog(QDialog):
         # layers are appended to this list, so they appear at the bottom.
         for name, matches in target_layers.items():
             row = name_to_row[name]
-            item = QTableWidgetItem(self._display_name(matches[0]))
-            item.setData(Qt.UserRole, matches[0])
+            target_layer = matches[0]
+            target_text, _ = self._cell_text(target_layer)
+            item = QTableWidgetItem(target_text)
+            item.setData(Qt.UserRole, target_layer)
             self.layers.setItem(row, 0, item)
 
         # Folder columns. A mapped source is rendered on its target row.
@@ -378,7 +405,8 @@ class MergeSplitDialog(QDialog):
             self._set_layer_item(
                 row, col, source["layer"],
                 geometry_mismatch=geometry_mismatch,
-                target=target
+                target=target,
+                source_file=source.get("path")
             )
 
         # Keep columns compact. Avoid QHeaderView.setSectionResizeMode:
@@ -392,10 +420,18 @@ class MergeSplitDialog(QDialog):
             for row in range(self.layers.rowCount()):
                 item = self.layers.item(row, col)
                 if item:
-                    width = max(width, min(180, len(item.text()) * 7 + 24))
+                    max_line = max(
+                        (len(line) for line in item.text().splitlines()),
+                        default=0
+                    )
+                    width = max(width, min(240, max_line * 7 + 24))
             self.layers.setColumnWidth(col, width)
         self.layers.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.layers.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        # Each layer cell now contains name / geometry / source file.
+        # Give rows enough height to show the full correspondence.
+        for row in range(self.layers.rowCount()):
+            self.layers.setRowHeight(row, 62)
         self.layers.setUpdatesEnabled(True)
 
     def add_folders(self):
