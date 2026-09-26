@@ -5,7 +5,7 @@ import tempfile
 import zipfile
 
 from qgis.PyQt.QtCore import Qt
-from qgis.PyQt.QtGui import QColor
+from qgis.PyQt.QtGui import QColor, QCursor
 from qgis.PyQt.QtWidgets import (
     QDialog,
     QVBoxLayout,
@@ -45,19 +45,46 @@ class PolygonSplitTool(QgsMapTool):
         self.finished_callback = finished_callback
         self.cancelled_callback = cancelled_callback
         self.points = []
-        self._press_pos = None
 
-        self.rubberBand = QgsRubberBand(
+        # High-contrast drawing feedback:
+        # fill + black halo/yellow boundary + live cursor preview.
+        self.fillBand = QgsRubberBand(
             self.canvas, QgsWkbTypes.PolygonGeometry
         )
-        self.rubberBand.setColor(QColor(255, 0, 0, 80))
-        self.rubberBand.setFillColor(QColor(255, 0, 0, 35))
-        self.rubberBand.setWidth(2)
+        self.fillBand.setColor(QColor(255, 230, 0, 90))
+        self.fillBand.setFillColor(QColor(255, 230, 0, 40))
+        self.fillBand.setWidth(2)
+
+        self.lineHaloBand = QgsRubberBand(
+            self.canvas, QgsWkbTypes.LineGeometry
+        )
+        self.lineHaloBand.setColor(QColor(0, 0, 0, 230))
+        self.lineHaloBand.setWidth(7)
+
+        self.lineBand = QgsRubberBand(
+            self.canvas, QgsWkbTypes.LineGeometry
+        )
+        self.lineBand.setColor(QColor(255, 230, 0, 255))
+        self.lineBand.setWidth(4)
+
+        self.previewHaloBand = QgsRubberBand(
+            self.canvas, QgsWkbTypes.LineGeometry
+        )
+        self.previewHaloBand.setColor(QColor(0, 0, 0, 220))
+        self.previewHaloBand.setWidth(6)
+
+        self.previewBand = QgsRubberBand(
+            self.canvas, QgsWkbTypes.LineGeometry
+        )
+        self.previewBand.setColor(QColor(255, 255, 255, 255))
+        self.previewBand.setWidth(3)
+
+        self.setCursor(QCursor(Qt.CrossCursor))
 
     def _append_point(self, point):
         # Do not use QgsPointXY.equals(); it is not available in QGIS 3.40.
-        # A tiny screen-space duplicate check prevents the first click of a
-        # double-click from being added twice.
+        # Avoid adding the same point twice when Qt delivers the first
+        # double-click press followed by canvasDoubleClickEvent.
         if self.points:
             last = self.points[-1]
             dx = point.x() - last.x()
@@ -70,8 +97,11 @@ class PolygonSplitTool(QgsMapTool):
     def canvasPressEvent(self, event):
         if event.button() != Qt.LeftButton:
             return
-        self._press_pos = event.pos()
         self._append_point(self.toMapCoordinates(event.pos()))
+        self._refresh_preview(event.pos())
+
+    def canvasMoveEvent(self, event):
+        self._refresh_preview(event.pos())
 
     def canvasDoubleClickEvent(self, event):
         if event.button() != Qt.LeftButton:
@@ -110,22 +140,73 @@ class PolygonSplitTool(QgsMapTool):
             super().keyPressEvent(event)
 
     def _refresh_band(self):
-        self.rubberBand.reset(QgsWkbTypes.PolygonGeometry)
+        self.fillBand.reset(QgsWkbTypes.PolygonGeometry)
+        self.lineHaloBand.reset(QgsWkbTypes.LineGeometry)
+        self.lineBand.reset(QgsWkbTypes.LineGeometry)
+
         if not self.points:
+            self.fillBand.update()
+            self.lineHaloBand.update()
+            self.lineBand.update()
             return
+
         for point in self.points:
-            self.rubberBand.addPoint(point, False)
+            self.lineHaloBand.addPoint(point, False)
+            self.lineBand.addPoint(point, False)
+
         if len(self.points) >= 3:
-            self.rubberBand.closePoints(False)
-        self.rubberBand.update()
+            self.lineHaloBand.closePoints(False)
+            self.lineBand.closePoints(False)
+
+            polygon_points = list(self.points)
+            polygon_points.append(self.points[0])
+            polygon = QgsGeometry.fromPolygonXY([polygon_points])
+            self.fillBand.addGeometry(polygon, None, False)
+
+        self.fillBand.update()
+        self.lineHaloBand.update()
+        self.lineBand.update()
+
+    def _refresh_preview(self, screen_pos):
+        self.previewHaloBand.reset(QgsWkbTypes.LineGeometry)
+        self.previewBand.reset(QgsWkbTypes.LineGeometry)
+
+        if not self.points:
+            self.previewHaloBand.update()
+            self.previewBand.update()
+            return
+
+        current = self.toMapCoordinates(screen_pos)
+        last = self.points[-1]
+
+        self.previewHaloBand.addPoint(last, False)
+        self.previewHaloBand.addPoint(current, True)
+
+        self.previewBand.addPoint(last, False)
+        self.previewBand.addPoint(current, True)
+
+        self.previewHaloBand.update()
+        self.previewBand.update()
+
+    def _reset_visuals(self):
+        self.fillBand.reset(QgsWkbTypes.PolygonGeometry)
+        self.lineHaloBand.reset(QgsWkbTypes.LineGeometry)
+        self.lineBand.reset(QgsWkbTypes.LineGeometry)
+        self.previewHaloBand.reset(QgsWkbTypes.LineGeometry)
+        self.previewBand.reset(QgsWkbTypes.LineGeometry)
+        self.fillBand.update()
+        self.lineHaloBand.update()
+        self.lineBand.update()
+        self.previewHaloBand.update()
+        self.previewBand.update()
 
     def _finish(self, polygon):
-        self.rubberBand.reset(QgsWkbTypes.PolygonGeometry)
+        self._reset_visuals()
         self.canvas.unsetMapTool(self)
         self.finished_callback(polygon)
 
     def _cancel(self):
-        self.rubberBand.reset(QgsWkbTypes.PolygonGeometry)
+        self._reset_visuals()
         self.points = []
         self.canvas.unsetMapTool(self)
         if self.cancelled_callback is not None:
@@ -313,6 +394,11 @@ class SplitDialog(QDialog):
             ids = self._candidate_ids(layer)
             if ids:
                 result.append((layer, ids))
+                if layer.isEditable():
+                    self._log(
+                        "[SPLIT MATCH EDIT STATE] layer=%s features=%d modified=%s"
+                        % (layer.name(), len(ids), self._has_uncommitted_edits(layer))
+                    )
         self._log(
             "[SPLIT SCAN] vector_layers=%d matched_layers=%d matched_features=%d"
             % (vector_count, len(result), sum(len(ids) for _, ids in result))
@@ -558,38 +644,70 @@ class SplitDialog(QDialog):
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
+    @staticmethod
+    def _has_uncommitted_edits(layer):
+        """Return True only when an editable layer has changes after its last commit."""
+        if not layer.isEditable():
+            return False
+        try:
+            return bool(layer.isModified())
+        except Exception:
+            # Fail closed if a provider cannot report modification state.
+            return True
+
     def _delete_after_split(self, matches):
-        """Persistently delete matched features from non-editing source layers."""
+        """Persistently delete matched features while preserving clean edit sessions."""
         total = 0
         layers = 0
         skipped = 0
         errors = []
+
         for layer, ids in matches:
+            was_editable = layer.isEditable()
             started_here = False
+
             try:
-                if layer.isEditable():
+                modified = self._has_uncommitted_edits(layer)
+                self._log(
+                    "[SPLIT EDIT STATE] layer=%s editable=%s modified=%s"
+                    % (layer.name(), was_editable, modified)
+                )
+
+                if modified:
                     skipped += len(ids)
                     errors.append(
-                        "%s: 图层已有未提交编辑，未自动提交" % layer.name()
+                        "%s: 图层仍存在未提交编辑，未自动提交" % layer.name()
                     )
                     continue
-                if not layer.startEditing():
-                    skipped += len(ids)
-                    errors.append("%s: 无法进入编辑状态" % layer.name())
-                    continue
-                started_here = True
+
+                if not was_editable:
+                    if not layer.startEditing():
+                        skipped += len(ids)
+                        errors.append("%s: 无法进入编辑状态" % layer.name())
+                        continue
+                    started_here = True
+
                 if not layer.deleteFeatures(ids):
                     skipped += len(ids)
                     errors.append("%s: 删除要素失败" % layer.name())
-                    layer.rollBack()
+                    if started_here and layer.isEditable():
+                        layer.rollBack()
                     continue
-                if not layer.commitChanges():
+
+                # Existing clean edit sessions stay in editing mode.
+                stop_editing = started_here
+                if not layer.commitChanges(stopEditing=stop_editing):
+                    commit_errors = "; ".join(layer.commitErrors())
                     skipped += len(ids)
                     errors.append(
-                        "%s: 提交删除失败：%s" %
-                        (layer.name(), "; ".join(layer.commitErrors()))
+                        "%s: 提交删除失败：%s"
+                        % (layer.name(), commit_errors or "未知错误")
                     )
-                    layer.rollBack()
+                    if layer.isEditable():
+                        try:
+                            layer.rollBack()
+                        except Exception:
+                            pass
                     continue
 
                 remaining = sum(
@@ -598,13 +716,14 @@ class SplitDialog(QDialog):
                 if remaining:
                     skipped += remaining
                     errors.append(
-                        "%s: 提交后仍发现 %d 个目标要素" %
-                        (layer.name(), remaining)
+                        "%s: 提交后仍发现 %d 个目标要素"
+                        % (layer.name(), remaining)
                     )
                     continue
 
                 total += len(ids)
                 layers += 1
+
             except Exception as exc:
                 skipped += len(ids)
                 errors.append("%s: %s" % (layer.name(), exc))
@@ -613,6 +732,7 @@ class SplitDialog(QDialog):
                         layer.rollBack()
                     except Exception:
                         pass
+
         QgsProject.instance().setDirty(True)
         self.iface.mapCanvas().refresh()
         return total, layers, skipped, errors
@@ -688,20 +808,32 @@ class SplitDialog(QDialog):
 
                 path = project_dir / ("%s_split.qgz" % project_stem)
 
-                editable_matches = [
-                    layer.name() for layer, _ in matches if layer.isEditable()
-                ]
+                editable_matches = []
+                clean_edit_layers = []
+                for layer, _ in matches:
+                    if not layer.isEditable():
+                        continue
+                    if self._has_uncommitted_edits(layer):
+                        editable_matches.append(layer.name())
+                    else:
+                        clean_edit_layers.append(layer.name())
+
+                self._log(
+                    "[SPLIT PREFLIGHT] uncommitted=%s clean_editing=%s"
+                    % (editable_matches, clean_edit_layers)
+                )
+
                 if editable_matches:
                     QMessageBox.warning(
                         self,
                         "无法安全拆分",
-                        "以下图层存在未提交编辑：\n\n%s\n\n"
-                        "请先在 QGIS 中提交/保存这些图层的编辑，再重新执行 Split。\n"
-                        "插件不会自动提交这些编辑，以避免误提交其他修改。"
+                        "以下图层仍存在未提交编辑：\n\n%s\n\n"
+                        "请先在 QGIS 中执行“保存所有图层”，或逐图层提交编辑后，再重新执行 Split。\n"
+                        "仅保持编辑模式但已经保存的图层可以正常处理。"
                         % "\n".join(editable_matches[:20])
                     )
                     self._log(
-                        "[SPLIT PREFLIGHT BLOCK] editable_layers=%s" %
+                        "[SPLIT PREFLIGHT BLOCK] uncommitted_layers=%s" %
                         editable_matches,
                         Qgis.Warning
                     )
