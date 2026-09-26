@@ -6,8 +6,10 @@ from qgis.PyQt.QtWidgets import (
     QAbstractItemView, QRadioButton, QComboBox, QDialogButtonBox, QStyle
 )
 from qgis.PyQt.QtCore import Qt
+PLUGIN_VERSION = "1.0.8"
+
 from qgis.core import (
-    QgsProject, QgsVectorLayer, QgsFeature, QgsCoordinateTransform,
+    QgsProject, QgsVectorLayer, QgsFeature, QgsGeometry, QgsCoordinateTransform,
     QgsProviderRegistry, QgsMessageLog, Qgis
 )
 
@@ -106,7 +108,7 @@ class MergeSplitDialog(QDialog):
         self._created_target_names = set()
         self._diagnostic_lines = []
         self._last_resolution_error = ""
-        self.setWindowTitle("Merge and Split - 合并 v1.0.7")
+        self.setWindowTitle("Merge and Split - 合并 v%s" % PLUGIN_VERSION)
         self.resize(1250, 700)
         self._build_ui()
 
@@ -1152,8 +1154,8 @@ class MergeSplitDialog(QDialog):
 
                 geom = src_feat.geometry()
                 if geom and not geom.isNull():
-                    phase = "GEOMETRY_CLONE"
-                    geom = geom.clone()
+                    phase = "GEOMETRY_COPY"
+                    geom = QgsGeometry(src_feat.geometry())
 
                     if transform:
                         phase = "CRS_TRANSFORM"
@@ -1304,18 +1306,6 @@ class MergeSplitDialog(QDialog):
                     self._log(text_value, Qgis.Warning)
                     continue
 
-                if (
-                    target is None
-                    and len(self._target_layers().get(
-                        self._normalized_name(source["layer"].name()), []
-                    )) > 1
-                ):
-                    self._log(
-                        "[TARGET AMBIGUOUS] multiple same-name Engineering 1 targets"
-                        " for %r" % source["layer"].name(),
-                        Qgis.Warning
-                    )
-
                 resolved_count += 1
 
                 self._log(
@@ -1435,19 +1425,41 @@ class MergeSplitDialog(QDialog):
             project.setDirty(True)
             self.progress.setValue(100)
 
-            # “参与图层” = 源文件夹与原始工程1共同存在的图层名称。
-            # 用户后来通过“新增”创建的目标层不计入这里。
-            participating_names = {
-                self._normalized_name(source["layer"].name())
-                for source in selected
-                if (
-                    self._normalized_name(source["layer"].name())
-                    in original_target_names
-                )
-            }
+            # “参与图层” = 当前选中文件夹中的源图层名称已经有
+            # Engineering 1 目标。包含同名自动匹配，也包含“移至/新增”映射。
+            participating_names = set()
+            unresolved_names = set()
+            current_targets = self._target_layers()
+
+            for source in selected:
+                name = self._normalized_name(source["layer"].name())
+                if source["layer"].id() in self._source_target_map:
+                    participating_names.add(name)
+                    continue
+
+                candidates = current_targets.get(name, [])
+                mapping = self.mappings.get(name)
+
+                if len(candidates) == 1:
+                    participating_names.add(name)
+                    continue
+
+                if mapping:
+                    action = mapping.get("action")
+                    mapped_name = self._normalized_name(mapping.get("target"))
+                    if action == "move" and len(
+                        current_targets.get(mapped_name, [])
+                    ) == 1:
+                        participating_names.add(name)
+                        continue
+                    if action == "new" and len(candidates) == 1:
+                        participating_names.add(name)
+                        continue
+
+                unresolved_names.add(name)
 
             summary_log = (
-                "Merge and Split 1.0.3\n"
+                "Merge and Split %s\n"
                 "参与文件夹=%d\n"
                 "源图层总数=%d\n"
                 "参与图层=%d\n"
@@ -1459,8 +1471,11 @@ class MergeSplitDialog(QDialog):
                 "图层无效=%d\n"
                 "写入成功=%d\n"
                 "写入失败=%d\n"
+                "参与图层名称=%s\n"
+                "未设置目标图层名称=%s\n"
                 "新增要素=%d"
                 % (
+                    PLUGIN_VERSION,
                     sum(1 for enabled in self.folder_enabled if enabled),
                     len(selected),
                     len(participating_names),
@@ -1472,6 +1487,8 @@ class MergeSplitDialog(QDialog):
                     invalid_count,
                     merge_pass_count,
                     write_fail_count,
+                    ", ".join(sorted(participating_names)),
+                    ", ".join(sorted(unresolved_names)),
                     total_added
                 )
             )
