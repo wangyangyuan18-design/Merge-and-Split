@@ -3,7 +3,7 @@ from pathlib import Path
 from qgis.PyQt.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem,
     QPushButton, QLabel, QFileDialog, QMessageBox, QProgressBar,
-    QAbstractItemView, QRadioButton, QComboBox, QDialogButtonBox
+    QAbstractItemView, QRadioButton, QComboBox, QDialogButtonBox, QStyle
 )
 from qgis.PyQt.QtCore import Qt
 from qgis.core import (
@@ -22,7 +22,13 @@ class MappingDialog(QDialog):
         layout.addWidget(QLabel("<b>%s</b>" % layer_name))
 
         self.new_radio = QRadioButton("新增图层（新增）★")
+        self.new_radio.setIcon(
+            self.style().standardIcon(QStyle.SP_FileDialogNewFolder)
+        )
         self.move_radio = QRadioButton("移至已有图层（移至）★")
+        self.move_radio.setIcon(
+            self.style().standardIcon(QStyle.SP_ArrowRight)
+        )
         self.move_radio.setChecked(True)
         layout.addWidget(self.new_radio)
         layout.addWidget(self.move_radio)
@@ -103,8 +109,19 @@ class MergeSplitDialog(QDialog):
 
         row = QHBoxLayout()
         self.add_folder_btn = QPushButton("添加文件夹…")
+        self.add_folder_btn.setIcon(
+            self.style().standardIcon(QStyle.SP_DialogOpenButton)
+        )
+
         self.remove_folder_btn = QPushButton("移除选中文件夹")
+        self.remove_folder_btn.setIcon(
+            self.style().standardIcon(QStyle.SP_TrashIcon)
+        )
+
         self.clear_btn = QPushButton("清空")
+        self.clear_btn.setIcon(
+            self.style().standardIcon(QStyle.SP_DialogResetButton)
+        )
         self.add_folder_btn.clicked.connect(self.add_folders)
         self.remove_folder_btn.clicked.connect(self.remove_selected_folder)
         self.clear_btn.clicked.connect(self.clear_folders)
@@ -138,7 +155,14 @@ class MergeSplitDialog(QDialog):
         bottom = QHBoxLayout()
         bottom.addStretch()
         self.merge_btn = QPushButton("开始合并")
+        self.merge_btn.setIcon(
+            self.style().standardIcon(QStyle.SP_DialogApplyButton)
+        )
+
         self.close_btn = QPushButton("关闭")
+        self.close_btn.setIcon(
+            self.style().standardIcon(QStyle.SP_DialogCloseButton)
+        )
         self.merge_btn.clicked.connect(self.merge)
         self.close_btn.clicked.connect(self.close)
         bottom.addWidget(self.merge_btn)
