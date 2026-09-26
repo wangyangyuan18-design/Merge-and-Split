@@ -545,6 +545,7 @@ class SplitDialog(QDialog):
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def _delete_after_split(self, matches):
+        """Persistently delete matched features from non-editing source layers."""
         total = 0
         layers = 0
         skipped = 0
@@ -552,23 +553,42 @@ class SplitDialog(QDialog):
         for layer, ids in matches:
             started_here = False
             try:
-                if not layer.isEditable():
-                    if not layer.startEditing():
-                        skipped += len(ids)
-                        errors.append("%s: 无法进入编辑状态" % layer.name())
-                        continue
-                    started_here = True
+                if layer.isEditable():
+                    skipped += len(ids)
+                    errors.append(
+                        "%s: 图层已有未提交编辑，未自动提交" % layer.name()
+                    )
+                    continue
+                if not layer.startEditing():
+                    skipped += len(ids)
+                    errors.append("%s: 无法进入编辑状态" % layer.name())
+                    continue
+                started_here = True
                 if not layer.deleteFeatures(ids):
                     skipped += len(ids)
                     errors.append("%s: 删除要素失败" % layer.name())
-                    if started_here:
-                        layer.rollBack()
-                    continue
-                if started_here and not layer.commitChanges():
-                    skipped += len(ids)
-                    errors.append("%s: 提交删除失败" % layer.name())
                     layer.rollBack()
                     continue
+                if not layer.commitChanges():
+                    skipped += len(ids)
+                    errors.append(
+                        "%s: 提交删除失败：%s" %
+                        (layer.name(), "; ".join(layer.commitErrors()))
+                    )
+                    layer.rollBack()
+                    continue
+
+                remaining = sum(
+                    1 for fid in ids if layer.getFeature(fid).isValid()
+                )
+                if remaining:
+                    skipped += remaining
+                    errors.append(
+                        "%s: 提交后仍发现 %d 个目标要素" %
+                        (layer.name(), remaining)
+                    )
+                    continue
+
                 total += len(ids)
                 layers += 1
             except Exception as exc:
