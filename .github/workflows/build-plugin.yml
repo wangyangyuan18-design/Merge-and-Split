@@ -1,0 +1,49 @@
+name: Build QGIS Plugin ZIP
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-plugin:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare QGIS plugin package
+        shell: bash
+        run: |
+          set -e
+          PLUGIN_DIR="Merge-and-Split"
+          rm -rf "$PLUGIN_DIR" "Merge-and-Split.zip"
+          mkdir -p "$PLUGIN_DIR"
+
+          rsync -a ./ "$PLUGIN_DIR"/ \
+            --exclude=".git/" \
+            --exclude=".github/" \
+            --exclude="Merge-and-Split/" \
+            --exclude="*.zip" \
+            --exclude="__pycache__/" \
+            --exclude="*.pyc"
+
+          test -f "$PLUGIN_DIR/metadata.txt"
+          test -f "$PLUGIN_DIR/__init__.py"
+
+          zip -r "Merge-and-Split.zip" "$PLUGIN_DIR" \
+            -x "$PLUGIN_DIR/__pycache__/*" \
+            -x "$PLUGIN_DIR/*.pyc"
+
+      - name: Upload plugin ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: Merge-and-Split-QGIS-Plugin
+          path: Merge-and-Split.zip
+          if-no-files-found: error
+          retention-days: 30
