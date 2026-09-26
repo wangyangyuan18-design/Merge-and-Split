@@ -91,7 +91,7 @@ class MergeSplitDialog(QDialog):
         self.folder_enabled = []
         self._feature_counts = {}
         self._source_target_map = {}
-        self.setWindowTitle("Merge and Split - 合并")
+        self.setWindowTitle("Merge and Split - 合并 v1.0.1")
         self.resize(1250, 700)
         self._build_ui()
 
@@ -186,14 +186,16 @@ class MergeSplitDialog(QDialog):
         for node in root.findLayers():
             layer = node.layer()
             if isinstance(layer, QgsVectorLayer):
-                result.setdefault(layer.name(), []).append(layer)
+                key = self._normalized_name(layer.name())
+                result.setdefault(key, []).append(layer)
 
         # Keep any valid vector layer which is not currently represented in
         # the tree as a fallback.
         for layer in QgsProject.instance().mapLayers().values():
             if isinstance(layer, QgsVectorLayer):
-                if layer.name() not in result:
-                    result[layer.name()] = [layer]
+                key = self._normalized_name(layer.name())
+                if key not in result:
+                    result[key] = [layer]
         return result
 
     def _load_layer(self, path, name=None, uri=None, provider="ogr"):
@@ -244,11 +246,26 @@ class MergeSplitDialog(QDialog):
                 continue
         return result
 
+    @staticmethod
+    def _normalized_name(name):
+        # SHP filenames determine source layer names. Ignore accidental
+        # leading/trailing spaces when matching against Engineering 1.
+        return str(name or "").strip()
+
+    @staticmethod
+    def _flat_wkb_type(layer):
+        """Return the WKB type without Z/M dimensions."""
+        try:
+            from qgis.core import QgsWkbTypes
+            return QgsWkbTypes.flatType(layer.wkbType())
+        except Exception:
+            return layer.wkbType()
+
     def _geometry_kind(self, layer):
         """Return the normalized QGIS geometry family: Point/Line/Polygon."""
         try:
             from qgis.core import QgsWkbTypes
-            return QgsWkbTypes.geometryType(layer.wkbType())
+            return QgsWkbTypes.geometryType(self._flat_wkb_type(layer))
         except Exception:
             return layer.geometryType()
 
@@ -674,27 +691,36 @@ class MergeSplitDialog(QDialog):
         try:
             from qgis.core import QgsWkbTypes
             wkb_name = QgsWkbTypes.displayString(layer.wkbType())
+            flat_name = QgsWkbTypes.displayString(
+                self._flat_wkb_type(layer)
+            )
         except Exception:
             wkb_name = str(layer.wkbType())
+            flat_name = str(self._flat_wkb_type(layer))
 
-        return "%s / WKB=%s / geometryType=%s" % (
-            self._geometry_type_name(layer),
-            wkb_name,
-            str(self._geometry_kind(layer))
+        return (
+            "%s / WKB=%s / flatWKB=%s / geometryType=%s"
+            % (
+                self._geometry_type_name(layer),
+                wkb_name,
+                flat_name,
+                str(self._geometry_kind(layer))
+            )
         )
 
     def _compatible(self, target, source):
-        # Engineering 1 is the master schema. Field differences never block
-        # merging; only the normalized Point/Line/Polygon geometry family does.
+        # Geometry matching intentionally ignores Z/M dimensions.
+        # Point == PointZ, MultiPolygon == MultiPolygonZ, etc.
+        # Multipart and singlepart remain different geometry types.
         target = self._first_target(target)
         if not isinstance(target, QgsVectorLayer):
             return False
         if not isinstance(source, QgsVectorLayer):
             return False
-        return self._geometry_kind(target) == self._geometry_kind(source)
+        return self._flat_wkb_type(target) == self._flat_wkb_type(source)
 
     def _resolve_target(self, source):
-        name = source["layer"].name()
+        name = self._normalized_name(source["layer"].name())
         target_layers = self._target_layers()
         targets = target_layers.get(name, [])
         if targets:
@@ -848,9 +874,9 @@ class MergeSplitDialog(QDialog):
             # 这个数量在合并开始前已经确定，不受合并过程中的新增/映射影响。
             target_name_set = set(self._target_layers().keys())
             common_layer_names = {
-                source["layer"].name()
+                self._normalized_name(source["layer"].name())
                 for source in selected
-                if source["layer"].name() in target_name_set
+                if self._normalized_name(source["layer"].name()) in target_name_set
             }
 
             message = (
