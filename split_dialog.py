@@ -488,7 +488,35 @@ class SplitDialog(QDialog):
                     error_message or "QgsVectorFileWriter 返回错误代码 %s"
                     % error_code
                 )
-            return new_file or str(file_path), new_layer or options.layerName
+
+            actual_file = Path(new_file or str(file_path))
+            if driver == "ESRI Shapefile":
+                actual_stem = actual_file.with_suffix("")
+                requested_stem = Path(file_path).with_suffix("")
+                required = (".shp", ".shx", ".dbf")
+
+                def complete(stem):
+                    return all(stem.with_suffix(ext).exists() for ext in required)
+
+                # Prefer the writer-returned path, then the requested path.
+                if not complete(actual_stem) and complete(requested_stem):
+                    actual_stem = requested_stem
+
+                if not complete(actual_stem):
+                    produced = sorted(
+                        actual_stem.parent.glob(actual_stem.name + ".*")
+                    )
+                    produced_names = ", ".join(
+                        p.name for p in produced
+                    ) or "无文件"
+                    raise RuntimeError(
+                        "Shapefile 输出不完整：%s；实际生成：%s"
+                        % (actual_stem.name, produced_names)
+                    )
+
+                actual_file = actual_stem.with_suffix(".shp")
+
+            return str(actual_file), new_layer or options.layerName
         finally:
             layer.selectByIds(selected_before)
 
@@ -555,14 +583,42 @@ class SplitDialog(QDialog):
         target_stem = Path(target_stem)
         target_stem.parent.mkdir(parents=True, exist_ok=True)
         SplitDialog._remove_shapefile_bundle(target_stem)
+
+        required = (".shp", ".shx", ".dbf")
+        missing = [
+            ext for ext in required
+            if not source_stem.with_suffix(ext).exists()
+        ]
+        if missing:
+            produced = sorted(
+                source_stem.parent.glob(source_stem.name + ".*")
+            )
+            produced_names = ", ".join(
+                p.name for p in produced
+            ) or "无文件"
+            raise RuntimeError(
+                "Shapefile 输出不完整：%s；缺少 %s；实际生成：%s"
+                % (
+                    source_stem.name,
+                    ", ".join(missing),
+                    produced_names
+                )
+            )
+
         copied = []
         for source in sorted(source_stem.parent.glob(source_stem.name + ".*")):
             target = target_stem.parent / (target_stem.name + source.suffix)
             shutil.copy2(source, target)
             copied.append(target)
-        if not target_stem.with_suffix(".shp").exists():
+
+        missing_target = [
+            ext for ext in required
+            if not target_stem.with_suffix(ext).exists()
+        ]
+        if missing_target:
             raise RuntimeError(
-                "Shapefile 输出不完整：%s" % source_stem.name
+                "Shapefile 复制不完整：%s；缺少 %s"
+                % (target_stem.name, ", ".join(missing_target))
             )
         return copied
 
@@ -593,14 +649,17 @@ class SplitDialog(QDialog):
                     used_names
                 )
                 temp_shp = temp_dir / (layer_name + ".shp")
-                self._write_layer(
+                actual_file, _ = self._write_layer(
                     layer, ids, temp_shp, "ESRI Shapefile",
                     layer_name=layer_name, first_file=True
                 )
+                actual_stem = Path(actual_file).with_suffix("")
                 external_stem = split_folder / layer_name
-                external_bundles.append(external_stem)
+                # Keep both paths: the source path is whatever GDAL actually
+                # produced; the target path follows our required naming.
+                external_bundles.append((actual_stem, external_stem))
 
-                copied = QgsVectorLayer(str(temp_shp), layer.name(), "ogr")
+                copied = QgsVectorLayer(str(actual_file), layer.name(), "ogr")
                 if not copied.isValid():
                     raise RuntimeError(
                         "无法重新打开输出 SHP 图层：%s" % layer.name()
@@ -629,14 +688,13 @@ class SplitDialog(QDialog):
             # Only after the QGZ is complete, materialize the external
             # companion SHP bundles. The QGZ itself is already complete at
             # this point, so a QGZ build failure cannot erase prior output.
-            for stem in external_bundles:
-                temp_stem = temp_dir / stem.name
-                self._copy_shapefile_bundle(temp_stem, stem)
-                created_external.append(stem)
+            for source_stem, target_stem in external_bundles:
+                self._copy_shapefile_bundle(source_stem, target_stem)
+                created_external.append(target_stem)
 
             # Remove obsolete files only after all current bundles exist.
             keep_files = set()
-            for stem in external_bundles:
+            for _, stem in external_bundles:
                 for item in stem.parent.glob(stem.name + ".*"):
                     keep_files.add(item.name)
             for stale in split_folder.glob("%s_split_*.*" % project_stem):
