@@ -22,8 +22,8 @@ class MappingDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel("<b>%s</b>" % layer_name))
 
-        self.new_radio = QRadioButton("新增图层")
-        self.move_radio = QRadioButton("移至已有图层")
+        self.new_radio = QRadioButton("新增图层（新增）★")
+        self.move_radio = QRadioButton("移至已有图层（移至）★")
         self.move_radio.setChecked(True)
         layout.addWidget(self.new_radio)
         layout.addWidget(self.move_radio)
