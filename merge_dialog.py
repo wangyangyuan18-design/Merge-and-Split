@@ -3,8 +3,7 @@ from pathlib import Path
 from qgis.PyQt.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem,
     QPushButton, QLabel, QFileDialog, QMessageBox, QProgressBar,
-    QAbstractItemView, QRadioButton, QComboBox, QDialogButtonBox,
-    QHeaderView
+    QAbstractItemView, QRadioButton, QComboBox, QDialogButtonBox
 )
 from qgis.PyQt.QtCore import Qt
 from qgis.core import (
@@ -73,6 +72,7 @@ class MergeSplitDialog(QDialog):
         self.sources = []
         self.mappings = {}
         self.folder_enabled = []
+        self._feature_counts = {}
         self.setWindowTitle("Merge and Split - 合并")
         self.resize(1250, 700)
         self._build_ui()
@@ -107,9 +107,6 @@ class MergeSplitDialog(QDialog):
         self.layers.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.layers.setSelectionBehavior(QAbstractItemView.SelectItems)
         self.layers.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.layers.horizontalHeader().setSectionResizeMode(
-            0, QHeaderView.ResizeToContents
-        )
         self.layers.horizontalHeader().sectionClicked.connect(
             self._header_clicked
         )
@@ -213,7 +210,10 @@ class MergeSplitDialog(QDialog):
 
     def _cell_text(self, layer):
         try:
-            count = layer.featureCount()
+            count = self._feature_counts.get(layer.id())
+            if count is None:
+                count = layer.featureCount()
+                self._feature_counts[layer.id()] = count
             return "%s [%d]" % (layer.name(), count), count
         except Exception:
             return "%s [读取失败]" % layer.name(), -1
@@ -266,6 +266,7 @@ class MergeSplitDialog(QDialog):
                 row_names.append(row_name)
             source_records_by_row.setdefault(row_name, []).append(source)
 
+        self.layers.setUpdatesEnabled(False)
         self.layers.clear()
         self.layers.setColumnCount(1 + len(self.folders))
         self.layers.setRowCount(len(row_names))
@@ -307,23 +308,22 @@ class MergeSplitDialog(QDialog):
             seen.add(key)
             self._set_layer_item(row, col, source["layer"])
 
-        # Make the matrix compact. Long folder names no longer consume the
-        # entire window; horizontal scrolling is available when needed.
+        # Keep columns compact. Avoid QHeaderView.setSectionResizeMode:
+        # QGIS 3.40.14 / Qt 5.15.13 can crash during plugin startup.
         header = self.layers.horizontalHeader()
-        header.setSectionResizeMode(QHeaderView.Interactive)
-        self.layers.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.layers.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-
         for col in range(self.layers.columnCount()):
             width = 90
             header_text = self.layers.horizontalHeaderItem(col)
             if header_text:
-                width = max(width, min(180, len(header_text.text()) * 9 + 24))
+                width = max(width, min(180, len(header_text.text()) * 8 + 24))
             for row in range(self.layers.rowCount()):
                 item = self.layers.item(row, col)
                 if item:
-                    width = max(width, min(180, len(item.text()) * 8 + 24))
-            header.resizeSection(col, width)
+                    width = max(width, min(180, len(item.text()) * 7 + 24))
+            self.layers.setColumnWidth(col, width)
+        self.layers.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.layers.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.layers.setUpdatesEnabled(True)
 
     def add_folders(self):
         # Non-native dialog permits selecting several directories with Ctrl.
@@ -350,6 +350,10 @@ class MergeSplitDialog(QDialog):
                     self.folders.append(path)
                     self.folder_enabled.append(True)
                     for layer, source_path in scanned:
+                        try:
+                            self._feature_counts[layer.id()] = layer.featureCount()
+                        except Exception:
+                            self._feature_counts[layer.id()] = -1
                         self.sources.append({
                             "folder": path,
                             "path": source_path,
@@ -384,6 +388,7 @@ class MergeSplitDialog(QDialog):
         self.folders.clear()
         self.folder_enabled.clear()
         self.sources.clear()
+        self._feature_counts.clear()
         self.mappings.clear()
         self.layers.clear()
 
