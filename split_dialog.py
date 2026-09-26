@@ -14,9 +14,7 @@ from qgis.PyQt.QtWidgets import (
     QPushButton,
     QRadioButton,
     QButtonGroup,
-    QComboBox,
     QDialogButtonBox,
-    QFileDialog,
     QMessageBox,
     QProgressBar,
 )
@@ -144,7 +142,8 @@ class SplitDialog(QDialog):
         self.polygon = None
         self.tool = None
         self.setWindowTitle("Merge and Split - 拆分/区域处理 v%s" % SPLIT_VERSION)
-        self.resize(560, 430)
+        self.setWindowModality(Qt.NonModal)
+        self.resize(560, 360)
         self._build_ui()
 
     def _build_ui(self):
@@ -164,32 +163,13 @@ class SplitDialog(QDialog):
         layout.addWidget(self.area_label)
 
         self.delete_radio = QRadioButton("② 删除区域内要素")
-        self.qgz_radio = QRadioButton("② 另存为 QGZ 工程")
-        self.file_radio = QRadioButton("② 导出到文件夹")
+        self.qgz_radio = QRadioButton("② 另存为 QGZ 工程并导出到文件夹")
         self.delete_radio.setChecked(True)
 
         self.action_group = QButtonGroup(self)
-        for radio in (self.delete_radio, self.qgz_radio, self.file_radio):
+        for radio in (self.delete_radio, self.qgz_radio):
             self.action_group.addButton(radio)
             layout.addWidget(radio)
-
-        file_row = QHBoxLayout()
-        file_row.addWidget(QLabel("文件格式："))
-        self.format_combo = QComboBox()
-        self.format_combo.addItem("ESRI Shapefile (*.shp)", "ESRI Shapefile")
-        self.format_combo.addItem("GeoJSON (*.geojson)", "GeoJSON")
-        self.format_combo.addItem("KML (*.kml)", "KML")
-        self.format_combo.addItem("GML (*.gml)", "GML")
-        file_row.addWidget(self.format_combo, 1)
-        layout.addLayout(file_row)
-
-        self.folder_label = QLabel("输出文件夹：默认原工程目录")
-        self.folder_label.setWordWrap(True)
-        layout.addWidget(self.folder_label)
-
-        self.folder_btn = QPushButton("选择输出文件夹…")
-        self.folder_btn.clicked.connect(self.choose_folder)
-        layout.addWidget(self.folder_btn)
 
         self.action_hint = QLabel()
         self.action_hint.setWordWrap(True)
@@ -198,7 +178,6 @@ class SplitDialog(QDialog):
 
         self.delete_radio.toggled.connect(self._update_controls)
         self.qgz_radio.toggled.connect(self._update_controls)
-        self.file_radio.toggled.connect(self._update_controls)
 
         self.progress = QProgressBar()
         self.progress.setRange(0, 100)
@@ -214,23 +193,17 @@ class SplitDialog(QDialog):
         layout.addWidget(buttons)
 
     def _update_controls(self):
-        file_mode = self.file_radio.isChecked()
-        self.format_combo.setEnabled(file_mode)
-        self.folder_btn.setEnabled(file_mode)
         if self.delete_radio.isChecked():
             self.action_hint.setText(
-                "删除模式：只删除当前已开启编辑的矢量图层中的相交要素。"
-            )
-        elif self.qgz_radio.isChecked():
-            self.action_hint.setText(
-                "QGZ 模式：自动使用原工程目录和原工程名，生成 原工程名_split.qgz。"
-                "QGZ 内只使用 SHP 数据，不创建 GPKG；同时在原工程目录同步生成同名 SHP 数据文件。"
+                "删除模式：删除当前已开启编辑的矢量图层中，与区域相交的要素。"
             )
         else:
             self.action_hint.setText(
-                "文件模式：默认输出到原工程目录，并使用 原工程名_split_图层名 作为文件名。"
-                "只有存在相交要素的图层才会输出。"
+                "拆分模式：一次操作同时生成 原工程名_split.qgz 和 "
+                "原工程名_split SHP 文件夹。两者只包含区域内要素；"
+                "输出成功后，原工程删除这些要素。"
             )
+
 
     def start_drawing(self):
         if self.tool is not None:
@@ -240,11 +213,16 @@ class SplitDialog(QDialog):
             "当前区域：绘制中……左键单击增加节点，左键双击完成，Esc 取消。"
         )
         self.tool = PolygonSplitTool(self.iface, self._polygon_finished)
+        self.hide()
+        self.canvas.setFocus()
         self.canvas.setMapTool(self.tool)
 
     def _polygon_finished(self, polygon):
         self.tool = None
         self.polygon = polygon
+        self.show()
+        self.raise_()
+        self.activateWindow()
         self.area_label.setText(
             "当前区域：已完成（%d 个顶点）" %
             (len(polygon.asPolygon()[0]) - 1 if polygon.asPolygon() else 0)
