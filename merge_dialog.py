@@ -29,7 +29,10 @@ class MappingDialog(QDialog):
 
         self.combo = QComboBox()
         for target in target_layers:
-            if target.geometryType() == source_geometry_type:
+            if (
+                hasattr(target, "wkbType")
+                and self._geometry_kind(target) == source_geometry_type
+            ):
                 self.combo.addItem(target.name())
         layout.addWidget(self.combo)
 
@@ -41,6 +44,14 @@ class MappingDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+    @staticmethod
+    def _geometry_kind(layer):
+        try:
+            from qgis.core import QgsWkbTypes
+            return QgsWkbTypes.geometryType(layer.wkbType())
+        except Exception:
+            return layer.geometryType()
 
     def choice(self):
         if self.new_radio.isChecked():
@@ -208,6 +219,14 @@ class MergeSplitDialog(QDialog):
                 continue
         return result
 
+    def _geometry_kind(self, layer):
+        """Return the normalized QGIS geometry family: Point/Line/Polygon."""
+        try:
+            from qgis.core import QgsWkbTypes
+            return QgsWkbTypes.geometryType(layer.wkbType())
+        except Exception:
+            return layer.geometryType()
+
     def _geometry_type_name(self, layer):
         names = {
             0: "点 (Point)",
@@ -215,7 +234,8 @@ class MergeSplitDialog(QDialog):
             2: "面 (Polygon)",
             3: "未知 (Unknown)"
         }
-        return names.get(layer.geometryType(), str(layer.geometryType()))
+        kind = self._geometry_kind(layer)
+        return names.get(kind, str(kind))
 
     def _cell_text(self, layer):
         try:
@@ -329,7 +349,7 @@ class MergeSplitDialog(QDialog):
                 target = self._first_target(target_matches)
             geometry_mismatch = (
                 target is not None
-                and target.geometryType() != source["layer"].geometryType()
+                and self._geometry_kind(target) != self._geometry_kind(source["layer"])
             )
             self._set_layer_item(
                 row, col, source["layer"],
@@ -469,7 +489,7 @@ class MergeSplitDialog(QDialog):
 
         source_layer = item.data(Qt.UserRole)
         source_geometry_type = (
-            source_layer.geometryType()
+            self._geometry_kind(source_layer)
             if isinstance(source_layer, QgsVectorLayer)
             else None
         )
@@ -478,7 +498,7 @@ class MergeSplitDialog(QDialog):
             for target in targets:
                 if (
                     source_geometry_type is None
-                    or target.geometryType() == source_geometry_type
+                    or self._geometry_kind(target) == source_geometry_type
                 ):
                     compatible_targets.append(target)
 
@@ -582,7 +602,7 @@ class MergeSplitDialog(QDialog):
             return False
         if not isinstance(source, QgsVectorLayer):
             return False
-        return target.geometryType() == source.geometryType()
+        return self._geometry_kind(target) == self._geometry_kind(source)
 
     def _resolve_target(self, source):
         name = source["layer"].name()
@@ -724,6 +744,15 @@ class MergeSplitDialog(QDialog):
             project.setDirty(True)
             self.progress.setValue(100)
 
+            # “参与图层”只统计工程1与所选文件夹中同名的共同图层。
+            # 未匹配源图层单独显示，不计入这里。
+            target_name_set = set(self._target_layers().keys())
+            common_layer_names = set(
+                source["layer"].name()
+                for source in selected
+                if source["layer"].name() in target_name_set
+            )
+
             message = (
                 "合并完成。\n\n"
                 "参与文件夹：%d\n"
@@ -731,7 +760,7 @@ class MergeSplitDialog(QDialog):
                 "新增要素：%d"
                 % (
                     sum(1 for enabled in self.folder_enabled if enabled),
-                    len(selected),
+                    len(common_layer_names),
                     total_added
                 )
             )
