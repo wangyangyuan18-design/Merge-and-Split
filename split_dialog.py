@@ -458,6 +458,19 @@ class SplitDialog(QDialog):
         used_names.add(candidate)
         return candidate
 
+    @staticmethod
+    def _shp_sidecar(stem, extension):
+        """Append a Shapefile extension without parsing dots in the layer name."""
+        return Path(str(stem) + extension)
+
+    @staticmethod
+    def _shp_stem_from_file(file_path):
+        """Remove only the final .shp extension; preserve dots in the basename."""
+        path = Path(file_path)
+        if path.name.lower().endswith(".shp"):
+            return path.with_name(path.name[:-4])
+        return path
+
     def _write_layer(self, layer, ids, file_path, driver, layer_name=None,
                      first_file=True):
         selected_before = list(layer.selectedFeatureIds())
@@ -491,12 +504,15 @@ class SplitDialog(QDialog):
 
             actual_file = Path(new_file or str(file_path))
             if driver == "ESRI Shapefile":
-                actual_stem = actual_file.with_suffix("")
-                requested_stem = Path(file_path).with_suffix("")
+                actual_stem = self._shp_stem_from_file(actual_file)
+                requested_stem = self._shp_stem_from_file(file_path)
                 required = (".shp", ".shx", ".dbf")
 
                 def complete(stem):
-                    return all(stem.with_suffix(ext).exists() for ext in required)
+                    return all(
+                        self._shp_sidecar(stem, ext).exists()
+                        for ext in required
+                    )
 
                 # Prefer the writer-returned path, then the requested path.
                 if not complete(actual_stem) and complete(requested_stem):
@@ -514,7 +530,7 @@ class SplitDialog(QDialog):
                         % (actual_stem.name, produced_names)
                     )
 
-                actual_file = actual_stem.with_suffix(".shp")
+                actual_file = self._shp_sidecar(actual_stem, ".shp")
 
             return str(actual_file), new_layer or options.layerName
         finally:
@@ -587,7 +603,7 @@ class SplitDialog(QDialog):
         required = (".shp", ".shx", ".dbf")
         missing = [
             ext for ext in required
-            if not source_stem.with_suffix(ext).exists()
+            if not SplitDialog._shp_sidecar(source_stem, ext).exists()
         ]
         if missing:
             produced = sorted(
@@ -613,7 +629,7 @@ class SplitDialog(QDialog):
 
         missing_target = [
             ext for ext in required
-            if not target_stem.with_suffix(ext).exists()
+            if not SplitDialog._shp_sidecar(target_stem, ext).exists()
         ]
         if missing_target:
             raise RuntimeError(
