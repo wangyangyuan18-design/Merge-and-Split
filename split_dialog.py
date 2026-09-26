@@ -511,9 +511,7 @@ class SplitDialog(QDialog):
                     layer_name=layer_name, first_file=True
                 )
                 external_stem = split_folder / layer_name
-                self._copy_shapefile_bundle(temp_shp, external_stem)
                 external_bundles.append(external_stem)
-                created_external.append(external_stem)
 
                 copied = QgsVectorLayer(str(temp_shp), layer.name(), "ogr")
                 if not copied.isValid():
@@ -540,10 +538,15 @@ class SplitDialog(QDialog):
                     if item.is_file():
                         archive.write(item, item.name)
 
-            # Only after the QGZ is complete, remove obsolete files from the
-            # external companion folder. A failed build therefore cannot
-            # destroy the previous successful external output.
-            keep_files = set()
+            # Only after the QGZ is complete, materialize the external
+            # companion SHP bundles. The QGZ itself is already complete at
+            # this point, so a QGZ build failure cannot erase prior output.
+            for stem in external_bundles:
+                temp_stem = temp_dir / stem.name
+                self._copy_shapefile_bundle(temp_stem, stem)
+                created_external.append(stem)
+
+            # Remove obsolete files only after all current bundles exist.
             for stem in external_bundles:
                 for item in stem.parent.glob(stem.name + ".*"):
                     keep_files.add(item.name)
