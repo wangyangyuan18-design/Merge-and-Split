@@ -143,7 +143,18 @@ class MergeSplitDialog(QDialog):
         )
 
     def _target_layers(self):
+        # Follow the actual Engineering 1 layer-tree order, not the arbitrary
+        # registry/mapLayers insertion order. This is also what determines the
+        # matrix row order and where newly created layers are appended.
         result = {}
+        root = QgsProject.instance().layerTreeRoot()
+        for node in root.findLayers():
+            layer = node.layer()
+            if isinstance(layer, QgsVectorLayer):
+                result.setdefault(layer.name(), []).append(layer)
+
+        # Keep any valid vector layer which is not currently represented in
+        # the tree as a fallback.
         for layer in QgsProject.instance().mapLayers().values():
             if isinstance(layer, QgsVectorLayer):
                 result.setdefault(layer.name(), []).append(layer)
