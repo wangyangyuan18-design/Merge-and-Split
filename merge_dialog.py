@@ -105,7 +105,8 @@ class MergeSplitDialog(QDialog):
         self._source_target_map = {}
         self._created_target_names = set()
         self._diagnostic_lines = []
-        self.setWindowTitle("Merge and Split - 合并 v1.0.3")
+        self._last_resolution_error = ""
+        self.setWindowTitle("Merge and Split - 合并 v1.0.4")
         self.resize(1250, 700)
         self._build_ui()
 
@@ -462,7 +463,7 @@ class MergeSplitDialog(QDialog):
 
     def _display_name(self, layer):
         name = layer.name()
-        mapping = self.mappings.get(name)
+        mapping = self.mappings.get(self._normalized_name(name))
         if mapping:
             if mapping.get("action") == "new":
                 return name + "（新增）★"
@@ -482,7 +483,7 @@ class MergeSplitDialog(QDialog):
 
         for source in self.sources:
             name = source["layer"].name()
-            mapping = self.mappings.get(name)
+            mapping = self.mappings.get(self._normalized_name(name))
             row_name = name
 
             if mapping and mapping.get("action") == "move":
@@ -653,6 +654,7 @@ class MergeSplitDialog(QDialog):
         self._source_target_map.clear()
         self._created_target_names.clear()
         self._diagnostic_lines.clear()
+        self._last_resolution_error = ""
         self.mappings.clear()
         self.layers.clear()
 
@@ -763,8 +765,9 @@ class MergeSplitDialog(QDialog):
         self._rebuild_matrix()
 
     def _first_source_by_name(self, name):
+        normalized = self._normalized_name(name)
         for source in self.sources:
-            if source["layer"].name() == name:
+            if self._normalized_name(source["layer"].name()) == normalized:
                 return source
         raise RuntimeError("找不到源图层：" + name)
 
@@ -891,10 +894,23 @@ class MergeSplitDialog(QDialog):
         }
         # Geometry compatibility only compares geometry signature.
         # Layer validity is reported separately as an invalid-layer error.
-        result["compatible"] = (
-            result["family_equal"]
-            and result["multipart_equal"]
-        )
+        # Exact Flat WKB is the geometry identity.
+        # Z/M dimensions are deliberately ignored here.
+        result["compatible"] = result["flat_wkb_name_equal"]
+        if result["compatible"]:
+            if not result["target_valid"] or not result["source_valid"]:
+                result["root_cause"] = "INVALID_LAYER"
+            else:
+                result["root_cause"] = "PASS"
+        elif not result["flat_wkb_name_equal"]:
+            result["root_cause"] = "FLAT_WKB_MISMATCH"
+        elif not result["family_equal"]:
+            result["root_cause"] = "GEOMETRY_FAMILY_MISMATCH"
+        elif not result["multipart_equal"]:
+            result["root_cause"] = "SINGLE_MULTI_MISMATCH"
+        else:
+            result["root_cause"] = "UNKNOWN_GEOMETRY_MISMATCH"
+
         result["target"] = target_info
         result["source"] = source_info
         return result
@@ -934,6 +950,7 @@ class MergeSplitDialog(QDialog):
             "  单/多部件相同：%s\\n"
             "  flatWKB 数值相同：%s\\n"
             "  flatWKB 名称相同：%s\\n"
+            "根因代码：%s\\n"
             "最终几何兼容：%s\\n"
             "目标图层有效：%s\\n"
             "源图层有效：%s\\n"
@@ -953,6 +970,7 @@ class MergeSplitDialog(QDialog):
                 compare["family_equal"], compare["multipart_equal"],
                 compare["flat_wkb_equal"],
                 compare["flat_wkb_name_equal"],
+                compare["root_cause"],
                 compare["compatible"],
                 compare["target_valid"],
                 compare["source_valid"],
@@ -976,8 +994,11 @@ class MergeSplitDialog(QDialog):
         name = self._normalized_name(source["layer"].name())
         target_layers = self._target_layers()
         targets = target_layers.get(name, [])
-        if targets:
-            return self._first_target(targets)
+        if len(targets) == 1:
+            return targets[0]
+        if len(targets) > 1:
+            self._last_resolution_error = "MULTIPLE_TARGETS"
+            return None
 
         mapping = self.mappings.get(name)
         if not mapping:
@@ -992,6 +1013,59 @@ class MergeSplitDialog(QDialog):
 
         return None
 
+    def _field_summary(self, layer):
+        fields = []
+        for field in layer.fields():
+            fields.append({
+                "name": field.name(),
+                "type": field.typeName(),
+                "length": field.length(),
+                "precision": field.precision()
+            })
+        return fields
+
+    def _field_mapping_diagnostic(self, target, source):
+        target_fields = self._field_summary(target)
+        source_fields = self._field_summary(source)
+        target_names = {item["name"] for item in target_fields}
+        source_names = {item["name"] for item in source_fields}
+
+        return {
+            "target_fields": target_fields,
+            "source_fields": source_fields,
+            "common": sorted(target_names & source_names),
+            "target_only": sorted(target_names - source_names),
+            "source_only": sorted(source_names - target_names)
+        }
+
+    def _prepare_geometry_for_target(self, geom, target, source):
+        if geom is None or geom.isNull():
+            return geom, False
+
+        from qgis.core import QgsWkbTypes
+
+        target_type = target.wkbType()
+        source_type = source.wkbType()
+        target_z = QgsWkbTypes.hasZ(target_type)
+        target_m = QgsWkbTypes.hasM(target_type)
+        source_z = QgsWkbTypes.hasZ(source_type)
+        source_m = QgsWkbTypes.hasM(source_type)
+
+        changed = False
+        abstract = geom.get()
+        if abstract is not None:
+            if source_z and not target_z:
+                changed = abstract.dropZValue() or changed
+            elif target_z and not source_z:
+                changed = abstract.addZValue(0.0) or changed
+
+            if source_m and not target_m:
+                changed = abstract.dropMValue() or changed
+            elif target_m and not source_m:
+                changed = abstract.addMValue(0.0) or changed
+
+        return geom, changed
+
     def _append_features(self, target, source):
         transform = None
         if (
@@ -1003,41 +1077,77 @@ class MergeSplitDialog(QDialog):
                 source.crs(), target.crs(), QgsProject.instance()
             )
 
-        was_editing = target.isEditable()
-        if not was_editing and not target.startEditing():
-            raise RuntimeError("无法进入编辑状态：" + target.name())
-
         fields = target.fields()
         source_fields = source.fields()
         source_index = {f.name(): i for i, f in enumerate(source_fields)}
-        count = 0
+        was_editing = target.isEditable()
+        started_editing = False
 
-        for src_feat in source.getFeatures():
-            feat = QgsFeature(fields)
-            geom = src_feat.geometry()
-            if geom and not geom.isNull():
-                geom = geom.clone()
-                if transform:
-                    geom.transform(transform)
-                feat.setGeometry(geom)
+        try:
+            if not was_editing:
+                if not target.startEditing():
+                    raise RuntimeError("无法进入编辑状态：" + target.name())
+                started_editing = True
 
-            values = []
-            for field in fields:
-                idx = source_index.get(field.name())
-                values.append(src_feat[idx] if idx is not None else None)
-            feat.setAttributes(values)
+            count = 0
+            for src_feat in source.getFeatures():
+                feat = QgsFeature(fields)
 
-            if not target.addFeature(feat):
-                raise RuntimeError("写入图层失败：" + target.name())
-            count += 1
+                geom = src_feat.geometry()
+                if geom and not geom.isNull():
+                    geom = geom.clone()
+                    if transform:
+                        result = geom.transform(transform)
+                        if result != 0:
+                            raise RuntimeError(
+                                "几何 CRS 转换失败，feature=%s，result=%s"
+                                % (src_feat.id(), result)
+                            )
 
-        if not was_editing:
-            if not target.commitChanges():
-                raise RuntimeError(
-                    "提交失败：" + target.name() + "\n"
-                    + "; ".join(target.commitErrors())
-                )
-        return count
+                    geom, dimension_changed = self._prepare_geometry_for_target(
+                        geom, target, source
+                    )
+                    if dimension_changed:
+                        self._log(
+                            "[GEOMETRY DIMENSION CONVERT] %s feature=%s | %s -> %s"
+                            % (
+                                source.name(),
+                                src_feat.id(),
+                                self._geometry_debug(source)["wkb"],
+                                self._geometry_debug(target)["wkb"]
+                            )
+                        )
+                    feat.setGeometry(geom)
+
+                values = []
+                for field in fields:
+                    idx = source_index.get(field.name())
+                    values.append(
+                        src_feat[idx] if idx is not None else None
+                    )
+                feat.setAttributes(values)
+
+                if not target.addFeature(feat):
+                    raise RuntimeError(
+                        "写入图层失败，feature=%s，target=%s"
+                        % (src_feat.id(), target.name())
+                    )
+                count += 1
+
+            if started_editing:
+                if not target.commitChanges():
+                    commit_errors = "; ".join(target.commitErrors())
+                    raise RuntimeError(
+                        "提交失败：" + target.name()
+                        + ("；" + commit_errors if commit_errors else "")
+                    )
+
+            return count
+
+        except Exception:
+            if started_editing and target.isEditable():
+                target.rollBack()
+            raise
 
     def _checked_sources(self):
         result = []
@@ -1066,6 +1176,7 @@ class MergeSplitDialog(QDialog):
             return
 
         total_added = 0
+        original_target_names = set(self._target_layers().keys())
         skipped_layers = []
         errors = []
 
@@ -1095,11 +1206,17 @@ class MergeSplitDialog(QDialog):
                     target = self._resolve_target(source)
 
                 if target is None:
+                    reason = (
+                        "工程1存在多个同名目标图层，无法唯一确定"
+                        if self._last_resolution_error == "MULTIPLE_TARGETS"
+                        else "未找到工程1目标图层"
+                    )
                     text_value = (
-                        "%s :: %s → 未找到工程1目标图层" %
+                        "%s :: %s → %s" %
                         (
                             Path(source["folder"]).name,
-                            source["layer"].name()
+                            source["layer"].name(),
+                            reason
                         )
                     )
                     skipped_layers.append(text_value)
@@ -1118,7 +1235,32 @@ class MergeSplitDialog(QDialog):
 
                 compare = self._geometry_compare(target, source["layer"])
                 diagnostic = self._format_geometry_diagnostic(compare)
+                field_map = self._field_mapping_diagnostic(
+                    target, source["layer"]
+                )
                 self._log("[GEOMETRY CHECK]\n" + diagnostic)
+                self._log(
+                    "[FIELD MAPPING]\n"
+                    "common=%s\n"
+                    "target_only=%s\n"
+                    "source_only=%s\n"
+                    "target_fields=%s\n"
+                    "source_fields=%s"
+                    % (
+                        field_map["common"],
+                        field_map["target_only"],
+                        field_map["source_only"],
+                        field_map["target_fields"],
+                        field_map["source_fields"]
+                    )
+                )
+                self._log(
+                    "[FEATURE COUNTS BEFORE] target=%d source=%d"
+                    % (
+                        target.featureCount(),
+                        source["layer"].featureCount()
+                    )
+                )
 
                 if not compare["compatible"]:
                     errors.append(
@@ -1158,11 +1300,12 @@ class MergeSplitDialog(QDialog):
                     )
                     total_added += added
                     self._log(
-                        "[MERGE PASS] %s -> %s | added=%d" %
-                        (
+                        "[MERGE PASS] %s -> %s | added=%d | target_after=%d"
+                        % (
                             source["layer"].name(),
                             target.name(),
-                            added
+                            added,
+                            target.featureCount()
                         )
                     )
                 except Exception as exc:
@@ -1191,14 +1334,12 @@ class MergeSplitDialog(QDialog):
 
             # “参与图层” = 源文件夹与原始工程1共同存在的图层名称。
             # 用户后来通过“新增”创建的目标层不计入这里。
-            target_name_set = set(self._target_layers().keys())
             participating_names = {
                 self._normalized_name(source["layer"].name())
                 for source in selected
                 if (
-                    self._normalized_name(source["layer"].name()) in target_name_set
-                    and self._normalized_name(source["layer"].name())
-                    not in self._created_target_names
+                    self._normalized_name(source["layer"].name())
+                    in original_target_names
                 )
             }
 
