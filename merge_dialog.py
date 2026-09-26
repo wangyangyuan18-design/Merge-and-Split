@@ -341,12 +341,6 @@ class MergeSplitDialog(QDialog):
             return None
 
     @staticmethod
-    def _normalized_name(name):
-        # SHP filenames determine source layer names. Ignore accidental
-        # leading/trailing spaces when matching against Engineering 1.
-        return str(name or "").strip()
-
-    @staticmethod
     def _flat_wkb_type(layer):
         """Return WKB type without Z/M dimensions."""
         from qgis.core import QgsWkbTypes
@@ -515,9 +509,23 @@ class MergeSplitDialog(QDialog):
             target_layer = matches[0]
             target_text, _, target_geometry, target_source = self._cell_text(target_layer)
             item = QTableWidgetItem(target_text)
-            item.setToolTip(
-                "几何：%s\n源文件：%s" % (target_geometry, target_source)
-            )
+            if len(matches) > 1:
+                item.setText(
+                    target_text + "  ⚠ 同名目标×%d" % len(matches)
+                )
+                item.setToolTip(
+                    "工程1存在多个同名图层，无法自动唯一对应。\n"
+                    + "\n".join(
+                        "%d. id=%s  source=%s" %
+                        (i + 1, layer.id(), layer.source())
+                        for i, layer in enumerate(matches)
+                    )
+                )
+                item.setForeground(Qt.red)
+            else:
+                item.setToolTip(
+                    "几何：%s\n源文件：%s" % (target_geometry, target_source)
+                )
             item.setData(Qt.UserRole, target_layer)
             self.layers.setItem(row, 0, item)
 
@@ -529,7 +537,7 @@ class MergeSplitDialog(QDialog):
         seen = set()
         for source in self.sources:
             name = source["layer"].name()
-            mapping = self.mappings.get(name)
+            mapping = self.mappings.get(self._normalized_name(name))
             row_name = name
             if mapping and mapping.get("action") == "move":
                 target_name = mapping.get("target")
@@ -541,16 +549,10 @@ class MergeSplitDialog(QDialog):
                 continue
             col = self.folders.index(source["folder"]) + 1
             key = (row, col)
-            if key in seen:
-                continue
-            seen.add(key)
             target = None
             target_matches = target_layers.get(row_name, [])
-            if target_matches:
-                target = self._first_target(target_matches)
-
-            # Record the exact target shown for this source cell.
-            if target is not None:
+            if len(target_matches) == 1:
+                target = target_matches[0]
                 self._source_target_map[source["layer"].id()] = target
 
             geometry_mismatch = (
@@ -558,6 +560,22 @@ class MergeSplitDialog(QDialog):
                 and self._flat_wkb_name(target)
                 != self._flat_wkb_name(source["layer"])
             )
+
+            if key in seen:
+                # Two source layers in the same folder resolve to the same
+                # matrix cell. Keep the first visible cell but log the
+                # ambiguity; every source still gets its own target mapping.
+                existing = self.layers.item(row, col)
+                if existing:
+                    existing.setText(existing.text() + "  ⚠ 多源")
+                    existing.setToolTip(
+                        existing.toolTip()
+                        + "\n⚠ 同一文件夹有多个源图层落入此单元格。"
+                    )
+                    existing.setForeground(Qt.red)
+                continue
+            seen.add(key)
+
             self._set_layer_item(
                 row, col, source["layer"],
                 geometry_mismatch=geometry_mismatch,
@@ -778,9 +796,7 @@ class MergeSplitDialog(QDialog):
 
         try:
             from qgis.core import QgsWkbTypes
-            geom = QgsWkbTypes.displayString(
-                QgsWkbTypes.flatType(source.wkbType())
-            )
+            geom = QgsWkbTypes.displayString(source.wkbType())
         except Exception:
             geometry_map = {
                 0: "Point",
@@ -897,19 +913,12 @@ class MergeSplitDialog(QDialog):
         # Exact Flat WKB is the geometry identity.
         # Z/M dimensions are deliberately ignored here.
         result["compatible"] = result["flat_wkb_name_equal"]
-        if result["compatible"]:
-            if not result["target_valid"] or not result["source_valid"]:
-                result["root_cause"] = "INVALID_LAYER"
-            else:
-                result["root_cause"] = "PASS"
-        elif not result["flat_wkb_name_equal"]:
-            result["root_cause"] = "FLAT_WKB_MISMATCH"
-        elif not result["family_equal"]:
-            result["root_cause"] = "GEOMETRY_FAMILY_MISMATCH"
-        elif not result["multipart_equal"]:
-            result["root_cause"] = "SINGLE_MULTI_MISMATCH"
+        if not result["target_valid"] or not result["source_valid"]:
+            result["root_cause"] = "INVALID_LAYER"
+        elif result["flat_wkb_name_equal"]:
+            result["root_cause"] = "PASS"
         else:
-            result["root_cause"] = "UNKNOWN_GEOMETRY_MISMATCH"
+            result["root_cause"] = "FLAT_WKB_MISMATCH"
 
         result["target"] = target_info
         result["source"] = source_info
@@ -991,6 +1000,7 @@ class MergeSplitDialog(QDialog):
         return self._geometry_compare(target, source)["compatible"]
 
     def _resolve_target(self, source):
+        self._last_resolution_error = ""
         name = self._normalized_name(source["layer"].name())
         target_layers = self._target_layers()
         targets = target_layers.get(name, [])
@@ -1030,12 +1040,30 @@ class MergeSplitDialog(QDialog):
         target_names = {item["name"] for item in target_fields}
         source_names = {item["name"] for item in source_fields}
 
+        target_by_name = {item["name"]: item for item in target_fields}
+        source_by_name = {item["name"]: item for item in source_fields}
+        type_conflicts = []
+        for name in sorted(target_names & source_names):
+            if (
+                target_by_name[name]["type"] != source_by_name[name]["type"]
+                or target_by_name[name]["length"]
+                != source_by_name[name]["length"]
+                or target_by_name[name]["precision"]
+                != source_by_name[name]["precision"]
+            ):
+                type_conflicts.append({
+                    "name": name,
+                    "target": target_by_name[name],
+                    "source": source_by_name[name]
+                })
+
         return {
             "target_fields": target_fields,
             "source_fields": source_fields,
             "common": sorted(target_names & source_names),
             "target_only": sorted(target_names - source_names),
-            "source_only": sorted(source_names - target_names)
+            "source_only": sorted(source_names - target_names),
+            "type_conflicts": type_conflicts
         }
 
     def _prepare_geometry_for_target(self, geom, target, source):
@@ -1223,6 +1251,18 @@ class MergeSplitDialog(QDialog):
                     self._log(text_value, Qgis.Warning)
                     continue
 
+                if (
+                    target is None
+                    and len(self._target_layers().get(
+                        self._normalized_name(source["layer"].name()), []
+                    )) > 1
+                ):
+                    self._log(
+                        "[TARGET AMBIGUOUS] multiple same-name Engineering 1 targets"
+                        " for %r" % source["layer"].name(),
+                        Qgis.Warning
+                    )
+
                 self._log(
                     "[TARGET CHOSEN] matrix=%s | target_id=%s | target_name=%r | source_id=%s"
                     % (
@@ -1244,12 +1284,14 @@ class MergeSplitDialog(QDialog):
                     "common=%s\n"
                     "target_only=%s\n"
                     "source_only=%s\n"
+                    "type_conflicts=%s\n"
                     "target_fields=%s\n"
                     "source_fields=%s"
                     % (
                         field_map["common"],
                         field_map["target_only"],
                         field_map["source_only"],
+                        field_map["type_conflicts"],
                         field_map["target_fields"],
                         field_map["source_fields"]
                     )
