@@ -525,8 +525,12 @@ class MergeSplitDialog(QDialog):
         return target
 
     def _compatible(self, target, source):
+        # Compatibility must always operate on one QgsVectorLayer.
+        # Older mapping paths may still pass the name->layers dictionary.
         target = self._first_target(target)
-        if target is None:
+        if not isinstance(target, QgsVectorLayer):
+            return False
+        if not isinstance(source, QgsVectorLayer):
             return False
         if target.geometryType() != source.geometryType():
             return False
