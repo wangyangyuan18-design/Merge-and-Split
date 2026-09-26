@@ -674,6 +674,25 @@ class SplitDialog(QDialog):
 
                 path = project_dir / ("%s_split.qgz" % project_stem)
 
+                editable_matches = [
+                    layer.name() for layer, _ in matches if layer.isEditable()
+                ]
+                if editable_matches:
+                    QMessageBox.warning(
+                        self,
+                        "无法安全拆分",
+                        "以下图层存在未提交编辑：\n\n%s\n\n"
+                        "请先在 QGIS 中提交/保存这些图层的编辑，再重新执行 Split。\n"
+                        "插件不会自动提交这些编辑，以避免误提交其他修改。"
+                        % "\n".join(editable_matches[:20])
+                    )
+                    self._log(
+                        "[SPLIT PREFLIGHT BLOCK] editable_layers=%s" %
+                        editable_matches,
+                        Qgis.Warning
+                    )
+                    return
+
                 self.progress.setValue(20)
                 layers, total, shp_bundles, split_folder = self._create_qgz(matches, path)
                 self.progress.setValue(65)
@@ -683,18 +702,28 @@ class SplitDialog(QDialog):
                     "[SPLIT QGZ] path=%s layers=%d features=%d"
                     % (path, layers, total)
                 )
-                QMessageBox.information(
-                    self,
-                    "Merge and Split",
-                    "拆分完成。\n\n"
-                    "原工程：已删除拆分区域要素\n"
-                    "删除要素：%d\n"
+                message = (
+                    "拆分输出完成。\n\n"
+                    "删除要素：%d / %d\n"
                     "QGZ 图层：%d\n"
                     "QGZ 要素：%d\n"
                     "QGZ：%s\n"
                     "SHP 文件夹：%s"
-                    % (deleted, layers, total, path, split_folder)
+                    % (deleted, total, layers, total, path, split_folder)
                 )
+                if delete_errors:
+                    message += (
+                        "\n\n⚠ 原工程未完全清理：%d 个要素未删除。\n%s"
+                        % (skipped, "\n".join(delete_errors[:10]))
+                    )
+                    self._log(
+                        "[SPLIT SOURCE DELETE PARTIAL] deleted=%d skipped=%d errors=%s"
+                        % (deleted, skipped, delete_errors),
+                        Qgis.Warning
+                    )
+                else:
+                    message = "原工程：已成功删除拆分区域要素\n\n" + message
+                QMessageBox.information(self, "Merge and Split", message)
                 self.polygon = None
                 return
 
