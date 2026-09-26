@@ -17,6 +17,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Validate Python syntax
+        shell: bash
+        run: |
+          set -e
+          python -m py_compile merge_dialog.py merge_split.py __init__.py
+
       - name: Prepare QGIS plugin package
         shell: bash
         run: |
