@@ -90,6 +90,7 @@ class MergeSplitDialog(QDialog):
         self.mappings = {}
         self.folder_enabled = []
         self._feature_counts = {}
+        self._source_target_map = {}
         self.setWindowTitle("Merge and Split - 合并")
         self.resize(1250, 700)
         self._build_ui()
@@ -386,6 +387,10 @@ class MergeSplitDialog(QDialog):
             self.layers.setItem(row, 0, item)
 
         # Folder columns. A mapped source is rendered on its target row.
+        # Cache the exact target object represented by the matrix cell. Merge
+        # uses this same object so the displayed pair and the actual pair
+        # cannot diverge.
+        self._source_target_map.clear()
         seen = set()
         for source in self.sources:
             name = source["layer"].name()
@@ -408,6 +413,11 @@ class MergeSplitDialog(QDialog):
             target_matches = target_layers.get(row_name, [])
             if target_matches:
                 target = self._first_target(target_matches)
+
+            # Record the exact target shown for this source cell.
+            if target is not None:
+                self._source_target_map[source["layer"].id()] = target
+
             geometry_mismatch = (
                 target is not None
                 and self._geometry_kind(target) != self._geometry_kind(source["layer"])
@@ -505,6 +515,7 @@ class MergeSplitDialog(QDialog):
         self.folder_enabled.clear()
         self.sources.clear()
         self._feature_counts.clear()
+        self._source_target_map.clear()
         self.mappings.clear()
         self.layers.clear()
 
@@ -659,11 +670,22 @@ class MergeSplitDialog(QDialog):
             return target[0] if target else None
         return target
 
+    def _geometry_debug(self, layer):
+        try:
+            from qgis.core import QgsWkbTypes
+            wkb_name = QgsWkbTypes.displayString(layer.wkbType())
+        except Exception:
+            wkb_name = str(layer.wkbType())
+
+        return "%s / WKB=%s / geometryType=%s" % (
+            self._geometry_type_name(layer),
+            wkb_name,
+            str(self._geometry_kind(layer))
+        )
+
     def _compatible(self, target, source):
-        # Merge semantics are intentionally the same as QGIS copy/paste:
-        # geometry type must match, while fields are mapped by field name.
-        # Engineering 1 is the master schema. Fields missing from the source
-        # become NULL; source-only fields are ignored.
+        # Engineering 1 is the master schema. Field differences never block
+        # merging; only the normalized Point/Line/Polygon geometry family does.
         target = self._first_target(target)
         if not isinstance(target, QgsVectorLayer):
             return False
@@ -778,7 +800,11 @@ class MergeSplitDialog(QDialog):
                     int(n * 100 / max(1, len(selected)))
                 )
 
-                target = self._resolve_target(source)
+                # Use exactly the target displayed in the main matrix.
+                target = self._source_target_map.get(source["layer"].id())
+                if target is None:
+                    target = self._resolve_target(source)
+
                 if target is None:
                     skipped_layers.append(
                         "%s :: %s" %
@@ -788,8 +814,15 @@ class MergeSplitDialog(QDialog):
 
                 if not self._compatible(target, source):
                     errors.append(
-                        "%s :: %s → 几何类型不兼容" %
-                        (Path(source["folder"]).name, source["layer"].name())
+                        "%s :: %s → 几何类型不兼容\\n"
+                        "工程1：%s\\n"
+                        "源图层：%s" %
+                        (
+                            Path(source["folder"]).name,
+                            source["layer"].name(),
+                            self._geometry_debug(target),
+                            self._geometry_debug(source["layer"])
+                        )
                     )
                     continue
 
@@ -811,14 +844,14 @@ class MergeSplitDialog(QDialog):
             project.setDirty(True)
             self.progress.setValue(100)
 
-            # “参与图层”只统计工程1与所选文件夹中同名的共同图层。
-            # 未匹配源图层单独显示，不计入这里。
+            # “参与图层” = 工程1与所选源文件夹共同存在的图层名称。
+            # 这个数量在合并开始前已经确定，不受合并过程中的新增/映射影响。
             target_name_set = set(self._target_layers().keys())
-            common_layer_names = set(
+            common_layer_names = {
                 source["layer"].name()
                 for source in selected
                 if source["layer"].name() in target_name_set
-            )
+            }
 
             message = (
                 "合并完成。\n\n"
