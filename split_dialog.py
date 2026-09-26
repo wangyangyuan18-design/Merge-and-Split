@@ -488,6 +488,7 @@ class SplitDialog(QDialog):
         split_folder.mkdir(parents=True, exist_ok=True)
         temp_dir = Path(tempfile.mkdtemp(prefix="merge_split_qgz_"))
         created_external = []
+        qgz_complete = False
         try:
             qgs_path = temp_dir / "split_project.qgs"
             new_project = QgsProject()
@@ -537,6 +538,7 @@ class SplitDialog(QDialog):
                 for item in sorted(temp_dir.iterdir()):
                     if item.is_file():
                         archive.write(item, item.name)
+            qgz_complete = True
 
             # Only after the QGZ is complete, materialize the external
             # companion SHP bundles. The QGZ itself is already complete at
@@ -547,6 +549,7 @@ class SplitDialog(QDialog):
                 created_external.append(stem)
 
             # Remove obsolete files only after all current bundles exist.
+            keep_files = set()
             for stem in external_bundles:
                 for item in stem.parent.glob(stem.name + ".*"):
                     keep_files.add(item.name)
@@ -561,11 +564,12 @@ class SplitDialog(QDialog):
         except Exception:
             for stem in created_external:
                 self._remove_shapefile_bundle(stem)
-            try:
-                if output_path.exists():
-                    output_path.unlink()
-            except Exception:
-                pass
+            if not qgz_complete:
+                try:
+                    if output_path.exists():
+                        output_path.unlink()
+                except Exception:
+                    pass
             raise
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
