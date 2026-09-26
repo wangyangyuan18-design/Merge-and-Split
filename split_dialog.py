@@ -442,6 +442,22 @@ class SplitDialog(QDialog):
         value = value.rstrip(". ")
         return value or "layer"
 
+    @staticmethod
+    def _unique_name(base_name, used_names):
+        """Return a filesystem-safe unique base name for one Split output layer."""
+        base = SplitDialog._safe_filename(base_name)
+        candidate = base
+        index = 2
+
+        # Compare case-insensitively because Windows filesystems normally do.
+        used_lower = {str(name).lower() for name in used_names}
+        while candidate.lower() in used_lower:
+            candidate = "%s_%d" % (base, index)
+            index += 1
+
+        used_names.add(candidate)
+        return candidate
+
     def _write_layer(self, layer, ids, file_path, driver, layer_name=None,
                      first_file=True):
         selected_before = list(layer.selectedFeatureIds())
