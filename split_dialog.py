@@ -479,6 +479,7 @@ class SplitDialog(QDialog):
         split_folder = project_dir / ("%s_split SHP" % project_stem)
         split_folder.mkdir(parents=True, exist_ok=True)
         temp_dir = Path(tempfile.mkdtemp(prefix="merge_split_qgz_"))
+        created_external = []
         try:
             qgs_path = temp_dir / "split_project.qgs"
             new_project = QgsProject()
@@ -504,6 +505,7 @@ class SplitDialog(QDialog):
                 external_stem = split_folder / layer_name
                 self._copy_shapefile_bundle(temp_shp, external_stem)
                 external_bundles.append(external_stem)
+                created_external.append(external_stem)
 
                 copied = QgsVectorLayer(str(temp_shp), layer.name(), "ogr")
                 if not copied.isValid():
@@ -530,6 +532,15 @@ class SplitDialog(QDialog):
                     if item.is_file():
                         archive.write(item, item.name)
             return len(created), total, external_bundles, split_folder
+        except Exception:
+            for stem in created_external:
+                self._remove_shapefile_bundle(stem)
+            try:
+                if output_path.exists():
+                    output_path.unlink()
+            except Exception:
+                pass
+            raise
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
