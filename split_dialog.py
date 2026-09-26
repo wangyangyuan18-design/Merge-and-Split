@@ -97,6 +97,8 @@ class PolygonSplitTool(QgsMapTool):
                 "Merge and Split",
                 "多边形无效或存在自相交，请重新绘制。"
             )
+            self.points = []
+            self._refresh_band()
             return
 
         self._finish(polygon)
@@ -134,7 +136,7 @@ class SplitDialog(QDialog):
     """
     Split phase:
       1. Draw a polygon.
-      2. Choose delete, QGZ, or vector-file export.
+      2. Choose delete, or create QGZ + SHP together.
       3. Exact geometry intersection is used after bounding-box filtering.
     """
 
@@ -238,12 +240,6 @@ class SplitDialog(QDialog):
             (len(polygon.asPolygon()[0]) - 1 if polygon.asPolygon() else 0)
         )
 
-    def choose_folder(self):
-        folder = QFileDialog.getExistingDirectory(
-            self, "选择拆分输出文件夹"
-        )
-        if folder:
-            self.folder_label.setText("输出文件夹：%s" % folder)
 
     def close_dialog(self):
         if self.tool is not None:
