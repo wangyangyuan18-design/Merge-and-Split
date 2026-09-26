@@ -8,7 +8,7 @@ from qgis.PyQt.QtWidgets import (
 from qgis.PyQt.QtCore import Qt
 from qgis.core import (
     QgsProject, QgsVectorLayer, QgsFeature, QgsCoordinateTransform,
-    QgsProviderRegistry
+    QgsProviderRegistry, QgsMessageLog, Qgis
 )
 
 
@@ -104,7 +104,8 @@ class MergeSplitDialog(QDialog):
         self._feature_counts = {}
         self._source_target_map = {}
         self._created_target_names = set()
-        self.setWindowTitle("Merge and Split - 合并 v1.0.2")
+        self._diagnostic_lines = []
+        self.setWindowTitle("Merge and Split - 合并 v1.0.3")
         self.resize(1250, 700)
         self._build_ui()
 
@@ -173,6 +174,12 @@ class MergeSplitDialog(QDialog):
             self.style().standardIcon(QStyle.SP_DialogApplyButton)
         )
 
+        self.copy_log_btn = QPushButton("复制诊断日志")
+        self.copy_log_btn.setIcon(
+            self.style().standardIcon(QStyle.SP_FileDialogDetailedView)
+        )
+        self.copy_log_btn.clicked.connect(self._copy_diagnostic_log)
+
         self.close_btn = QPushButton("关闭")
         self.close_btn.setIcon(
             self.style().standardIcon(QStyle.SP_DialogCloseButton)
@@ -180,8 +187,68 @@ class MergeSplitDialog(QDialog):
         self.merge_btn.clicked.connect(self.merge)
         self.close_btn.clicked.connect(self.close)
         bottom.addWidget(self.merge_btn)
+        bottom.addWidget(self.copy_log_btn)
         bottom.addWidget(self.close_btn)
         layout.addLayout(bottom)
+
+    def _log(self, message, level=None):
+        text_value = str(message)
+        self._diagnostic_lines.append(text_value)
+        try:
+            QgsMessageLog.logMessage(
+                text_value,
+                "Merge and Split",
+                level if level is not None else Qgis.Info
+            )
+        except Exception:
+            pass
+
+    def _target_resolution_diagnostic(self, source):
+        name = self._normalized_name(source["layer"].name())
+        target_layers = self._target_layers()
+        candidates = target_layers.get(name, [])
+
+        lines = [
+            "[TARGET RESOLUTION]",
+            "source_name=%r" % source["layer"].name(),
+            "normalized_name=%r" % name,
+            "source_layer_id=%s" % source["layer"].id(),
+            "source_file=%s" % source.get("path", ""),
+            "source_provider=%s" % source["layer"].providerType(),
+            "same_name_target_count=%d" % len(candidates),
+        ]
+
+        if not candidates:
+            lines.append("RESULT=NO_TARGET")
+        else:
+            for i, target in enumerate(candidates):
+                lines.append(
+                    "candidate[%d]: id=%s name=%r provider=%s source=%s"
+                    % (
+                        i,
+                        target.id(),
+                        target.name(),
+                        target.providerType(),
+                        target.source()
+                    )
+                )
+
+        return "\n".join(lines)
+
+    def _copy_diagnostic_log(self):
+        try:
+            from qgis.PyQt.QtWidgets import QApplication
+            QApplication.clipboard().setText(
+                "\n".join(self._diagnostic_lines)
+            )
+            QMessageBox.information(
+                self,
+                "诊断日志",
+                "已复制完整诊断日志。\n"
+                "同时也已写入 QGIS 的 Log Messages Panel。"
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "复制失败", str(exc))
 
     def _refresh_target_label(self):
         path = QgsProject.instance().fileName()
@@ -585,6 +652,7 @@ class MergeSplitDialog(QDialog):
         self._feature_counts.clear()
         self._source_target_map.clear()
         self._created_target_names.clear()
+        self._diagnostic_lines.clear()
         self.mappings.clear()
         self.layers.clear()
 
@@ -821,10 +889,10 @@ class MergeSplitDialog(QDialog):
                 == source_info["flatWkb"]
             )
         }
+        # Geometry compatibility only compares geometry signature.
+        # Layer validity is reported separately as an invalid-layer error.
         result["compatible"] = (
-            result["target_valid"]
-            and result["source_valid"]
-            and result["family_equal"]
+            result["family_equal"]
             and result["multipart_equal"]
         )
         result["target"] = target_info
@@ -866,7 +934,10 @@ class MergeSplitDialog(QDialog):
             "  单/多部件相同：%s\\n"
             "  flatWKB 数值相同：%s\\n"
             "  flatWKB 名称相同：%s\\n"
-            "最终兼容：%s"
+            "最终几何兼容：%s\\n"
+            "目标图层有效：%s\\n"
+            "源图层有效：%s\\n"
+            "最终可执行合并：%s"
             % (
                 t["name"], t["id"], repr(t["name"]), t["source"],
                 t["provider"], t["crs"], t["geometryType"],
@@ -882,7 +953,14 @@ class MergeSplitDialog(QDialog):
                 compare["family_equal"], compare["multipart_equal"],
                 compare["flat_wkb_equal"],
                 compare["flat_wkb_name_equal"],
-                compare["compatible"]
+                compare["compatible"],
+                compare["target_valid"],
+                compare["source_valid"],
+                (
+                    compare["compatible"]
+                    and compare["target_valid"]
+                    and compare["source_valid"]
+                )
             )
         )
 
@@ -1000,42 +1078,111 @@ class MergeSplitDialog(QDialog):
                     int(n * 100 / max(1, len(selected)))
                 )
 
+                self._log(
+                    "\n" + "=" * 72 + "\n"
+                    "SOURCE %d/%d\n%s" %
+                    (
+                        n + 1,
+                        len(selected),
+                        self._target_resolution_diagnostic(source)
+                    )
+                )
+
                 # Use exactly the target displayed in the main matrix.
                 target = self._source_target_map.get(source["layer"].id())
+                target_from_matrix = target is not None
                 if target is None:
                     target = self._resolve_target(source)
 
                 if target is None:
-                    skipped_layers.append(
-                        "%s :: %s" %
-                        (Path(source["folder"]).name, source["layer"].name())
+                    text_value = (
+                        "%s :: %s → 未找到工程1目标图层" %
+                        (
+                            Path(source["folder"]).name,
+                            source["layer"].name()
+                        )
                     )
+                    skipped_layers.append(text_value)
+                    self._log(text_value, Qgis.Warning)
                     continue
 
+                self._log(
+                    "[TARGET CHOSEN] matrix=%s | target_id=%s | target_name=%r | source_id=%s"
+                    % (
+                        target_from_matrix,
+                        target.id(),
+                        target.name(),
+                        source["layer"].id()
+                    )
+                )
+
                 compare = self._geometry_compare(target, source["layer"])
+                diagnostic = self._format_geometry_diagnostic(compare)
+                self._log("[GEOMETRY CHECK]\n" + diagnostic)
+
                 if not compare["compatible"]:
                     errors.append(
                         "%s :: %s → 几何类型不兼容\\n%s" %
                         (
                             Path(source["folder"]).name,
                             source["layer"].name(),
-                            self._format_geometry_diagnostic(compare)
+                            diagnostic
                         )
+                    )
+                    self._log(
+                        "[GEOMETRY FAIL] %s :: %s" %
+                        (
+                            Path(source["folder"]).name,
+                            source["layer"].name()
+                        ),
+                        Qgis.Warning
                     )
                     continue
 
+                if not compare["target_valid"] or not compare["source_valid"]:
+                    invalid_text = (
+                        "%s :: %s → 图层无效\\n%s" %
+                        (
+                            Path(source["folder"]).name,
+                            source["layer"].name(),
+                            diagnostic
+                        )
+                    )
+                    errors.append(invalid_text)
+                    self._log(invalid_text, Qgis.Warning)
+                    continue
+
                 try:
-                    total_added += self._append_features(
+                    added = self._append_features(
                         target, source["layer"]
+                    )
+                    total_added += added
+                    self._log(
+                        "[MERGE PASS] %s -> %s | added=%d" %
+                        (
+                            source["layer"].name(),
+                            target.name(),
+                            added
+                        )
                     )
                 except Exception as exc:
                     compare_text = self._format_geometry_diagnostic(compare)
+                    fail_text = (
+                        "%s :: %s → 写入失败：%s\\n%s" %
+                        (
+                            Path(source["folder"]).name,
+                            source["layer"].name(),
+                            str(exc),
+                            compare_text
+                        )
+                    )
+                    self._log("[MERGE FAIL]\n" + fail_text, Qgis.Critical)
                     errors.append(
                         "%s :: %s → %s" %
                         (
                             Path(source["folder"]).name,
                             source["layer"].name(),
-                            str(exc) + "\\n" + compare_text
+                            str(exc)
                         )
                     )
 
@@ -1054,6 +1201,25 @@ class MergeSplitDialog(QDialog):
                     not in self._created_target_names
                 )
             }
+
+            summary_log = (
+                "Merge and Split 1.0.3\n"
+                "参与文件夹=%d\n"
+                "源图层总数=%d\n"
+                "参与图层=%d\n"
+                "未找到目标=%d\n"
+                "错误=%d\n"
+                "新增要素=%d"
+                % (
+                    sum(1 for enabled in self.folder_enabled if enabled),
+                    len(selected),
+                    len(participating_names),
+                    len(skipped_layers),
+                    len(errors),
+                    total_added
+                )
+            )
+            self._log("\n" + "#" * 72 + "\n" + summary_log + "\n" + "#" * 72)
 
             message = (
                 "合并完成。\n\n"
