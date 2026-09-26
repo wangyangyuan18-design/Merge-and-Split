@@ -261,6 +261,13 @@ class MergeSplitDialog(QDialog):
         except Exception:
             return layer.wkbType()
 
+    def _flat_wkb_name(self, layer):
+        try:
+            from qgis.core import QgsWkbTypes
+            return QgsWkbTypes.displayString(self._flat_wkb_type(layer))
+        except Exception:
+            return str(self._flat_wkb_type(layer))
+
     def _geometry_kind(self, layer):
         """Return the normalized QGIS geometry family: Point/Line/Polygon."""
         try:
@@ -691,19 +698,15 @@ class MergeSplitDialog(QDialog):
         try:
             from qgis.core import QgsWkbTypes
             wkb_name = QgsWkbTypes.displayString(layer.wkbType())
-            flat_name = QgsWkbTypes.displayString(
-                self._flat_wkb_type(layer)
-            )
         except Exception:
             wkb_name = str(layer.wkbType())
-            flat_name = str(self._flat_wkb_type(layer))
 
         return (
             "%s / WKB=%s / flatWKB=%s / geometryType=%s"
             % (
                 self._geometry_type_name(layer),
                 wkb_name,
-                flat_name,
+                self._flat_wkb_name(layer),
                 str(self._geometry_kind(layer))
             )
         )
@@ -717,7 +720,7 @@ class MergeSplitDialog(QDialog):
             return False
         if not isinstance(source, QgsVectorLayer):
             return False
-        return self._flat_wkb_type(target) == self._flat_wkb_type(source)
+        return self._flat_wkb_name(target) == self._flat_wkb_name(source)
 
     def _resolve_target(self, source):
         name = self._normalized_name(source["layer"].name())
@@ -813,7 +816,7 @@ class MergeSplitDialog(QDialog):
             return
 
         total_added = 0
-        matched_layers = 0
+        matched_layer_names = set()
         skipped_layers = []
         errors = []
 
@@ -838,6 +841,10 @@ class MergeSplitDialog(QDialog):
                     )
                     continue
 
+                matched_layer_names.add(
+                    self._normalized_name(source["layer"].name())
+                )
+
                 if not self._compatible(target, source):
                     errors.append(
                         "%s :: %s → 几何类型不兼容\n"
@@ -856,7 +863,6 @@ class MergeSplitDialog(QDialog):
                     total_added += self._append_features(
                         target, source["layer"]
                     )
-                    matched_layers += 1
                 except Exception as exc:
                     errors.append(
                         "%s :: %s → %s" %
@@ -870,15 +876,8 @@ class MergeSplitDialog(QDialog):
             project.setDirty(True)
             self.progress.setValue(100)
 
-            # “参与图层” = 工程1与所选源文件夹共同存在的图层名称。
-            # 这个数量在合并开始前已经确定，不受合并过程中的新增/映射影响。
-            target_name_set = set(self._target_layers().keys())
-            common_layer_names = {
-                self._normalized_name(source["layer"].name())
-                for source in selected
-                if self._normalized_name(source["layer"].name()) in target_name_set
-            }
-
+            # “参与图层” = 本次合并中实际解析到目标的唯一图层名称。
+            # 这样与成功匹配/几何检查的实际参与对象保持一致。
             message = (
                 "合并完成。\n\n"
                 "参与文件夹：%d\n"
@@ -886,7 +885,7 @@ class MergeSplitDialog(QDialog):
                 "新增要素：%d"
                 % (
                     sum(1 for enabled in self.folder_enabled if enabled),
-                    len(common_layer_names),
+                    len(matched_layer_names),
                     total_added
                 )
             )
