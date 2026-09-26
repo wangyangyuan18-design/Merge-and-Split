@@ -159,7 +159,8 @@ class MergeSplitDialog(QDialog):
         # the tree as a fallback.
         for layer in QgsProject.instance().mapLayers().values():
             if isinstance(layer, QgsVectorLayer):
-                result.setdefault(layer.name(), []).append(layer)
+                if layer.name() not in result:
+                    result[layer.name()] = [layer]
         return result
 
     def _load_layer(self, path, name=None, uri=None, provider="ogr"):
