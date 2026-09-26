@@ -218,6 +218,7 @@ class MergeSplitDialog(QDialog):
             "source_provider=%s" % source["layer"].providerType(),
             "same_name_target_count=%d" % len(candidates),
             "normalized_target_key_exists=%s" % (name in target_layers),
+            "mapping=%r" % self.mappings.get(name),
         ]
 
         if not candidates:
@@ -476,8 +477,9 @@ class MergeSplitDialog(QDialog):
         row_names = list(target_names)
         for source in self.sources:
             name = source["layer"].name()
-            mapping = self.mappings.get(self._normalized_name(name))
-            row_name = name
+            normalized_name = self._normalized_name(name)
+            mapping = self.mappings.get(normalized_name)
+            row_name = normalized_name
 
             if mapping and mapping.get("action") == "move":
                 target_name = mapping.get("target")
@@ -535,8 +537,9 @@ class MergeSplitDialog(QDialog):
         seen = set()
         for source in self.sources:
             name = source["layer"].name()
-            mapping = self.mappings.get(self._normalized_name(name))
-            row_name = name
+            normalized_name = self._normalized_name(name)
+            mapping = self.mappings.get(normalized_name)
+            row_name = normalized_name
             if mapping and mapping.get("action") == "move":
                 target_name = mapping.get("target")
                 if target_name in target_layers:
@@ -693,8 +696,9 @@ class MergeSplitDialog(QDialog):
         if not name:
             return
 
+        normalized_name = self._normalized_name(name)
         target_layers = self._target_layers()
-        if name in target_layers:
+        if normalized_name in target_layers:
             candidates = target_layers[name]
             if len(candidates) > 1:
                 QMessageBox.warning(
