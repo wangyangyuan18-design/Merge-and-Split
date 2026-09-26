@@ -451,8 +451,8 @@ class MergeSplitDialog(QDialog):
             ):
                 QMessageBox.warning(
                     self, "几何类型不兼容",
-                    "“%s”与工程1同名，但几何类型不同。\\n\\n"
-                    "工程1：%s\\n源图层：%s\\n\\n"
+                    "“%s”与工程1同名，但几何类型不同。\n\n"
+                    "工程1：%s\n源图层：%s\n\n"
                     "该图层不能直接合并，也不能通过字段映射解决。" %
                     (
                         name,
@@ -701,7 +701,7 @@ class MergeSplitDialog(QDialog):
 
                 if not self._compatible(target, source):
                     errors.append(
-                        "%s :: %s → 字段/几何类型不兼容" %
+                        "%s :: %s → 几何类型不兼容" %
                         (Path(source["folder"]).name, source["layer"].name())
                     )
                     continue
