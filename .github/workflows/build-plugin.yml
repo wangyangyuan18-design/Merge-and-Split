@@ -22,6 +22,71 @@ jobs:
         run: |
           set -e
           python -m py_compile merge_dialog.py merge_split.py __init__.py
+          test "$(grep -c '^PLUGIN_VERSION = "1.0.8"
+      - name: Prepare QGIS plugin package
+        shell: bash
+        run: |
+          set -e
+          PLUGIN_DIR="Merge-and-Split"
+          rm -rf "$PLUGIN_DIR" "Merge-and-Split.zip"
+          mkdir -p "$PLUGIN_DIR"
+
+          rsync -a ./ "$PLUGIN_DIR"/ \
+            --exclude=".git/" \
+            --exclude=".github/" \
+            --exclude="Merge-and-Split/" \
+            --exclude="*.zip" \
+            --exclude="__pycache__/" \
+            --exclude="*.pyc"
+
+          test -f "$PLUGIN_DIR/metadata.txt"
+          test -f "$PLUGIN_DIR/__init__.py"
+
+          zip -r "Merge-and-Split.zip" "$PLUGIN_DIR" \
+            -x "$PLUGIN_DIR/__pycache__/*" \
+            -x "$PLUGIN_DIR/*.pyc"
+
+      - name: Upload plugin ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: Merge-and-Split-QGIS-Plugin
+          path: Merge-and-Split.zip
+          if-no-files-found: error
+          retention-days: 30
+ merge_dialog.py)" -eq 1
+          ! grep -n '\.clone()' merge_dialog.py
+          grep -q '^version=1.0.8
+      - name: Prepare QGIS plugin package
+        shell: bash
+        run: |
+          set -e
+          PLUGIN_DIR="Merge-and-Split"
+          rm -rf "$PLUGIN_DIR" "Merge-and-Split.zip"
+          mkdir -p "$PLUGIN_DIR"
+
+          rsync -a ./ "$PLUGIN_DIR"/ \
+            --exclude=".git/" \
+            --exclude=".github/" \
+            --exclude="Merge-and-Split/" \
+            --exclude="*.zip" \
+            --exclude="__pycache__/" \
+            --exclude="*.pyc"
+
+          test -f "$PLUGIN_DIR/metadata.txt"
+          test -f "$PLUGIN_DIR/__init__.py"
+
+          zip -r "Merge-and-Split.zip" "$PLUGIN_DIR" \
+            -x "$PLUGIN_DIR/__pycache__/*" \
+            -x "$PLUGIN_DIR/*.pyc"
+
+      - name: Upload plugin ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: Merge-and-Split-QGIS-Plugin
+          path: Merge-and-Split.zip
+          if-no-files-found: error
+          retention-days: 30
+ metadata.txt
 
       - name: Prepare QGIS plugin package
         shell: bash
