@@ -457,7 +457,8 @@ class MergeSplitDialog(QDialog):
 
             geometry_mismatch = (
                 target is not None
-                and self._geometry_kind(target) != self._geometry_kind(source["layer"])
+                and self._flat_wkb_name(target)
+                != self._flat_wkb_name(source["layer"])
             )
             self._set_layer_item(
                 row, col, source["layer"],
@@ -583,7 +584,8 @@ class MergeSplitDialog(QDialog):
             if (
                 isinstance(target, QgsVectorLayer)
                 and isinstance(source_layer, QgsVectorLayer)
-                and self._geometry_kind(target) != self._geometry_kind(source_layer)
+                and self._flat_wkb_name(target)
+                != self._flat_wkb_name(source_layer)
             ):
                 QMessageBox.warning(
                     self, "几何类型不兼容",
