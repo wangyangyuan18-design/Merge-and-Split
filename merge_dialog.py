@@ -3,7 +3,8 @@ from pathlib import Path
 from qgis.PyQt.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem,
     QPushButton, QLabel, QFileDialog, QMessageBox, QProgressBar,
-    QAbstractItemView, QRadioButton, QComboBox, QDialogButtonBox, QStyle
+    QAbstractItemView, QRadioButton, QComboBox, QDialogButtonBox, QStyle,
+    QApplication
 )
 from qgis.PyQt.QtCore import Qt
 PLUGIN_VERSION = "1.1.2"
@@ -1181,11 +1182,12 @@ class MergeSplitDialog(QDialog):
 
         return geom, changed
 
-    def _append_features(self, target, source):
+    def _append_features(self, target, source, progress_callback=None):
+        """Append features in batches while keeping QGIS responsive."""
         phase = "START_EDIT"
         current_feature_id = None
-
         transform = None
+
         if (
             target.crs().isValid()
             and source.crs().isValid()
@@ -1200,16 +1202,20 @@ class MergeSplitDialog(QDialog):
         source_index = {f.name(): i for i, f in enumerate(source_fields)}
         was_editing = target.isEditable()
         started_editing = False
+        batch = []
+        batch_size = 500
+        count = 0
+        processed = 0
+        conversion_log_count = 0
 
         try:
             if not was_editing:
-                phase = "START_EDIT"
                 if not target.startEditing():
                     raise RuntimeError("无法进入编辑状态：" + target.name())
                 started_editing = True
 
-            count = 0
-            conversion_log_count = 0
+            total_source = max(0, int(source.featureCount()))
+
             for src_feat in source.getFeatures():
                 current_feature_id = src_feat.id()
                 feat = QgsFeature(fields)
@@ -1233,16 +1239,16 @@ class MergeSplitDialog(QDialog):
                     geom, dimension_changed = self._prepare_geometry_for_target(
                         geom, target, source
                     )
-                    if dimension_changed:
+                    if dimension_changed and conversion_log_count < 10:
                         self._log(
                             "[GEOMETRY DIMENSION CONVERT] %s feature=%s | %s -> %s"
                             % (
-                                source.name(),
-                                src_feat.id(),
+                                source.name(), src_feat.id(),
                                 self._geometry_debug(source)["wkb"],
                                 self._geometry_debug(target)["wkb"]
                             )
                         )
+                        conversion_log_count += 1
                     feat.setGeometry(geom)
 
                 phase = "ATTRIBUTE_MAPPING"
@@ -1252,7 +1258,6 @@ class MergeSplitDialog(QDialog):
                     if idx is None:
                         values.append(None)
                         continue
-
                     raw_value = src_feat[idx]
                     converted, changed, failed = self._coerce_field_value(
                         raw_value, field
@@ -1262,12 +1267,8 @@ class MergeSplitDialog(QDialog):
                             "[ATTRIBUTE CONVERT] %s feature=%s field=%r "
                             "source_value=%r -> %r; target_type=%s%s"
                             % (
-                                source.name(),
-                                src_feat.id(),
-                                field.name(),
-                                raw_value,
-                                converted,
-                                field.typeName(),
+                                source.name(), src_feat.id(), field.name(),
+                                raw_value, converted, field.typeName(),
                                 " [UNCONVERTIBLE->NULL]" if failed else ""
                             ),
                             Qgis.Warning if failed else Qgis.Info
@@ -1276,23 +1277,54 @@ class MergeSplitDialog(QDialog):
                     values.append(converted)
 
                 feat.setAttributes(values)
+                batch.append(feat)
+                processed += 1
 
-                phase = "ADD_FEATURE"
-                if not target.addFeature(feat):
+                if len(batch) >= batch_size:
+                    phase = "ADD_FEATURE_BATCH"
+                    if not target.addFeatures(batch):
+                        provider_error = ""
+                        try:
+                            provider_error = str(target.dataProvider().lastError())
+                        except Exception:
+                            pass
+                        raise RuntimeError(
+                            "批量写入失败，最后 feature=%s，target=%s%s"
+                            % (
+                                current_feature_id, target.name(),
+                                ("；provider=" + provider_error)
+                                if provider_error else ""
+                            )
+                        )
+                    count += len(batch)
+                    batch.clear()
+
+                    if progress_callback:
+                        progress_callback(processed, total_source)
+                    QApplication.processEvents()
+
+            if batch:
+                phase = "ADD_FEATURE_BATCH"
+                if not target.addFeatures(batch):
                     provider_error = ""
                     try:
                         provider_error = str(target.dataProvider().lastError())
                     except Exception:
-                        provider_error = ""
+                        pass
                     raise RuntimeError(
-                        "写入图层失败，feature=%s，target=%s%s"
+                        "批量写入失败，最后 feature=%s，target=%s%s"
                         % (
-                            src_feat.id(),
-                            target.name(),
-                            ("；provider=" + provider_error) if provider_error else ""
+                            current_feature_id, target.name(),
+                            ("；provider=" + provider_error)
+                            if provider_error else ""
                         )
                     )
-                count += 1
+                count += len(batch)
+                batch.clear()
+
+            if progress_callback:
+                progress_callback(processed, total_source)
+            QApplication.processEvents()
 
             if started_editing:
                 phase = "COMMIT"
@@ -1302,23 +1334,19 @@ class MergeSplitDialog(QDialog):
                         "提交失败：" + target.name()
                         + ("；" + commit_errors if commit_errors else "")
                     )
-
             return count
 
         except Exception as exc:
             if started_editing and target.isEditable():
                 target.rollBack()
-
             raise RuntimeError(
                 "失败阶段=%s；feature=%s；target=%s；source=%s；原因=%s"
                 % (
-                    phase,
-                    current_feature_id,
-                    target.name(),
-                    source.name(),
-                    str(exc)
+                    phase, current_feature_id, target.name(),
+                    source.name(), str(exc)
                 )
             ) from exc
+
 
     def _checked_sources(self):
         result = []
@@ -1349,6 +1377,12 @@ class MergeSplitDialog(QDialog):
         total_added = 0
         resolved_count = 0
         geometry_pass_count = 0
+        total_work = max(
+            1,
+            sum(max(0, int(source["layer"].featureCount()))
+                for source in selected)
+        )
+        completed_work = 0
         geometry_fail_count = 0
         invalid_count = 0
         write_fail_count = 0
@@ -1358,12 +1392,19 @@ class MergeSplitDialog(QDialog):
 
         self.merge_btn.setEnabled(False)
         self.progress.setValue(0)
+        self._log(
+            "[MERGE START] sources=%d total_features=%d"
+            % (len(selected), total_work)
+        )
+        QApplication.processEvents()
 
         try:
             for n, source in enumerate(selected):
+                source_count = max(0, int(source["layer"].featureCount()))
                 self.progress.setValue(
-                    int(n * 100 / max(1, len(selected)))
+                    min(99, int(completed_work * 100 / total_work))
                 )
+                QApplication.processEvents()
 
                 self._log(
                     "\n" + "=" * 72 + "\n"
@@ -1397,6 +1438,11 @@ class MergeSplitDialog(QDialog):
                     )
                     skipped_layers.append(text_value)
                     self._log(text_value, Qgis.Warning)
+                    completed_work += source_count
+                    self.progress.setValue(
+                        min(99, int(completed_work * 100 / total_work))
+                    )
+                    QApplication.processEvents()
                     continue
 
                 resolved_count += 1
@@ -1474,14 +1520,36 @@ class MergeSplitDialog(QDialog):
                         )
                     )
                     invalid_count += 1
+                    completed_work += source_count
+                    self.progress.setValue(
+                        min(99, int(completed_work * 100 / total_work))
+                    )
+                    QApplication.processEvents()
                     errors.append(invalid_text)
                     self._log(invalid_text, Qgis.Warning)
                     continue
 
                 try:
+                    source_start_work = completed_work
+
+                    def update_feature_progress(processed, source_total):
+                        if source_total <= 0:
+                            return
+                        current = source_start_work + processed
+                        self.progress.setValue(
+                            min(99, int(current * 100 / total_work))
+                        )
+
                     added = self._append_features(
-                        target, source["layer"]
+                        target,
+                        source["layer"],
+                        progress_callback=update_feature_progress
                     )
+                    completed_work += source_count
+                    self.progress.setValue(
+                        min(99, int(completed_work * 100 / total_work))
+                    )
+                    QApplication.processEvents()
                     total_added += added
                     merge_pass_count += 1
                     self._log(
@@ -1506,6 +1574,11 @@ class MergeSplitDialog(QDialog):
                         )
                     )
                     self._log("[MERGE FAIL]\n" + fail_text, Qgis.Critical)
+                    completed_work += source_count
+                    self.progress.setValue(
+                        min(99, int(completed_work * 100 / total_work))
+                    )
+                    QApplication.processEvents()
                     errors.append(
                         "%s :: %s → %s" %
                         (
