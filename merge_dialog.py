@@ -616,12 +616,16 @@ class MergeSplitDialog(QDialog):
         dialog.setOption(QFileDialog.ShowDirsOnly, True)
         dialog.setOption(QFileDialog.DontUseNativeDialog, True)
         dialog.setWindowTitle("选择一个或多个文件夹")
-        try:
-            dialog.treeView().setSelectionMode(
-                QAbstractItemView.ExtendedSelection
-            )
-        except Exception:
-            pass
+        # QFileDialog has both a directory tree and a directory list.
+        # Set ExtendedSelection on both; setting only treeView() can still
+        # leave the actual directory list in single-selection mode on some
+        # QGIS/Qt builds.
+        for view_getter in ("treeView", "listView"):
+            try:
+                view = getattr(dialog, view_getter)()
+                view.setSelectionMode(QAbstractItemView.ExtendedSelection)
+            except Exception:
+                pass
 
         if dialog.exec_() != QDialog.Accepted:
             return
