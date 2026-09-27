@@ -1,4 +1,5 @@
 from pathlib import Path
+import time
 
 from qgis.PyQt.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem,
@@ -1207,7 +1208,9 @@ class MergeSplitDialog(QDialog):
         was_editing = target.isEditable()
         started_editing = False
         batch = []
-        batch_size = 500
+        # 200 个要素让出一次 Qt 主线程，避免大图层处理时 QGIS 长时间无响应。
+        # 这里优先保证界面响应，而不是追求极限吞吐量。
+        batch_size = 200
         count = 0
         processed = 0
         conversion_log_count = 0
@@ -1396,6 +1399,17 @@ class MergeSplitDialog(QDialog):
 
         self.merge_btn.setEnabled(False)
         self.progress.setValue(0)
+
+        # 合并期间暂停地图渲染。大量 addFeatures() 时，避免画布反复重绘
+        # 抢占主线程；最终只在全部处理完成后刷新一次。
+        canvas = self.iface.mapCanvas()
+        previous_render_flag = True
+        try:
+            previous_render_flag = canvas.renderFlag()
+            canvas.setRenderFlag(False)
+        except Exception:
+            pass
+
         self._log(
             "[MERGE START] sources=%d total_features=%d"
             % (len(selected), total_work)
@@ -1713,4 +1727,9 @@ class MergeSplitDialog(QDialog):
             self._refresh_target_label()
             self._rebuild_matrix()
         finally:
+            try:
+                canvas.setRenderFlag(previous_render_flag)
+                canvas.refresh()
+            except Exception:
+                pass
             self.merge_btn.setEnabled(True)
